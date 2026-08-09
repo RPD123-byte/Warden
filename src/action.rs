@@ -191,6 +191,7 @@ pub trait AgentBackend: Send + Sync + 'static {
         context: AgentCallContext,
         provider: &str,
         prompt: Option<String>,
+        model: Option<String>,
     ) -> Result<Value, String>;
 
     async fn send_persistent(
@@ -199,6 +200,7 @@ pub trait AgentBackend: Send + Sync + 'static {
         provider: &str,
         session_name: &str,
         prompt: Option<String>,
+        model: Option<String>,
     ) -> Result<Value, String>;
 
     async fn reset(
@@ -225,6 +227,7 @@ impl AgentBackend for NoAgentBackend {
         _: AgentCallContext,
         _: &str,
         _: Option<String>,
+        _: Option<String>,
     ) -> Result<Value, String> {
         Err("agent providers are not configured".into())
     }
@@ -233,6 +236,7 @@ impl AgentBackend for NoAgentBackend {
         _: AgentCallContext,
         _: &str,
         _: &str,
+        _: Option<String>,
         _: Option<String>,
     ) -> Result<Value, String> {
         Err("agent providers are not configured".into())
@@ -478,10 +482,11 @@ impl ActionGateway {
                 validate_agent_inference_params(&context, &request.params)?;
                 let provider = string_param(&request.params, "provider")?;
                 let prompt = optional_string_param(&request.params, "prompt")?;
+                let model = optional_non_empty_string_param(&request.params, "model")?;
                 await_agent_call(
                     &context,
                     self.agents
-                        .run_fresh(self.agent_context(&context), provider, prompt),
+                        .run_fresh(self.agent_context(&context), provider, prompt, model),
                 )
                 .await
             }
@@ -490,6 +495,7 @@ impl ActionGateway {
                 let provider = string_param(&request.params, "provider")?;
                 let name = string_param(&request.params, "name")?;
                 let prompt = optional_string_param(&request.params, "prompt")?;
+                let model = optional_non_empty_string_param(&request.params, "model")?;
                 await_agent_call(
                     &context,
                     self.agents.send_persistent(
@@ -497,6 +503,7 @@ impl ActionGateway {
                         provider,
                         name,
                         prompt,
+                        model,
                     ),
                 )
                 .await
@@ -1171,6 +1178,20 @@ fn optional_string_param(value: &Value, name: &'static str) -> Result<Option<Str
         Some(Value::String(value)) => Ok(Some(value.clone())),
         _ => Err(ActionError::InvalidParameter(name)),
     }
+}
+
+fn optional_non_empty_string_param(
+    value: &Value,
+    name: &'static str,
+) -> Result<Option<String>, ActionError> {
+    let Some(value) = optional_string_param(value, name)? else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ActionError::InvalidParameter(name));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn validate_agent_inference_params(

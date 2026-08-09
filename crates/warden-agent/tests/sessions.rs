@@ -12,13 +12,15 @@ use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 use warden_agent::{
     AgentError, AgentInput, AgentRequest, AgentResponse, AgentSessions, Conversation,
-    ProviderDriver, ProviderKind, ResumeMetadata, SessionKey,
+    InvocationEnvironment, ProviderDriver, ProviderKind, ResumeMetadata, SessionKey,
+    SessionSnapshot,
 };
 
 #[derive(Clone, Debug)]
 struct RecordedCall {
     sequence: u64,
     conversation: Conversation,
+    model: Option<String>,
 }
 
 #[derive(Default)]
@@ -48,6 +50,7 @@ impl ProviderDriver for FakeDriver {
         self.calls.lock().expect("calls mutex").push(RecordedCall {
             sequence: request.input.source_sequence,
             conversation: request.conversation.clone(),
+            model: request.model.clone(),
         });
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
@@ -217,6 +220,117 @@ async fn durable_metadata_can_be_restored_after_runtime_restart() {
         Conversation::Persistent { resume: Some(metadata) }
             if metadata.session_id == "session-1"
     ));
+}
+
+#[tokio::test]
+async fn persistent_session_binds_and_restores_its_model() {
+    let driver = Arc::new(FakeDriver::default());
+    let sessions = runtime(&driver);
+    let session_key = key("model-bound");
+
+    sessions
+        .send_persistent_with_options(
+            session_key.clone(),
+            AgentInput::new(1, json!({"event":1})),
+            Some("sonnet".into()),
+            InvocationEnvironment::default(),
+        )
+        .await
+        .expect("start with Sonnet");
+    sessions
+        .send_persistent_with_options(
+            session_key.clone(),
+            AgentInput::new(2, json!({"event":2})),
+            Some("sonnet".into()),
+            InvocationEnvironment::default(),
+        )
+        .await
+        .expect("resume with Sonnet");
+
+    let mismatch = sessions
+        .send_persistent_with_options(
+            session_key.clone(),
+            AgentInput::new(3, json!({"event":3})),
+            Some("opus".into()),
+            InvocationEnvironment::default(),
+        )
+        .await
+        .expect_err("model switch must fail");
+    assert!(matches!(
+        mismatch,
+        AgentError::SessionModelMismatch {
+            requested: Some(requested),
+            bound: Some(bound),
+        } if requested == "opus" && bound == "sonnet"
+    ));
+    assert_eq!(driver.calls().len(), 2);
+    assert!(
+        driver
+            .calls()
+            .iter()
+            .all(|call| call.model.as_deref() == Some("sonnet"))
+    );
+
+    let snapshot = sessions.session_snapshot(&session_key).await.unwrap();
+    assert_eq!(snapshot.model.as_deref(), Some("sonnet"));
+    let resumed_driver = Arc::new(FakeDriver::default());
+    let resumed = runtime(&resumed_driver);
+    resumed
+        .restore_session(session_key.clone(), snapshot)
+        .await
+        .expect("restore model-bound session");
+    resumed
+        .send_persistent_with_options(
+            session_key,
+            AgentInput::new(1, json!({"event":"new epoch"})).with_source_epoch(Uuid::new_v4()),
+            Some("sonnet".into()),
+            InvocationEnvironment::default(),
+        )
+        .await
+        .expect("restored session keeps Sonnet");
+}
+
+#[tokio::test]
+async fn legacy_model_less_snapshot_remains_bound_to_provider_default() {
+    let driver = Arc::new(FakeDriver::default());
+    let sessions = runtime(&driver);
+    let session_key = key("legacy-default");
+    sessions
+        .restore_session(
+            session_key.clone(),
+            SessionSnapshot {
+                resume: ResumeMetadata::new(ProviderKind::Claude, "legacy-session"),
+                model: None,
+                last_successful_source_epoch: None,
+                last_successful_source_sequence: Some(1),
+                last_successful_source_ordinal: Some(0),
+            },
+        )
+        .await
+        .expect("restore legacy snapshot");
+
+    let mismatch = sessions
+        .send_persistent_with_options(
+            session_key.clone(),
+            AgentInput::new(2, json!({"event":2})),
+            Some("sonnet".into()),
+            InvocationEnvironment::default(),
+        )
+        .await
+        .expect_err("legacy default session must not silently switch");
+    assert!(matches!(
+        mismatch,
+        AgentError::SessionModelMismatch {
+            requested: Some(_),
+            bound: None,
+        }
+    ));
+
+    sessions
+        .send_persistent(session_key, AgentInput::new(2, json!({"event":2})))
+        .await
+        .expect("provider-default resume remains valid");
+    assert_eq!(driver.calls()[0].model, None);
 }
 
 #[tokio::test]

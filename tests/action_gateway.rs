@@ -5,7 +5,7 @@ use std::{
     future::pending,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -60,12 +60,60 @@ struct BlockingAgentBackend {
 
 struct DelayedAgentBackend;
 
+type RecordedModelCalls = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+#[derive(Default)]
+struct ModelRecordingBackend {
+    calls: RecordedModelCalls,
+}
+
+#[async_trait::async_trait]
+impl AgentBackend for ModelRecordingBackend {
+    async fn run_fresh(
+        &self,
+        _: AgentCallContext,
+        provider: &str,
+        _: Option<String>,
+        model: Option<String>,
+    ) -> Result<Value, String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((format!("fresh:{provider}"), model.clone()));
+        Ok(json!({"model": model}))
+    }
+
+    async fn send_persistent(
+        &self,
+        _: AgentCallContext,
+        provider: &str,
+        name: &str,
+        _: Option<String>,
+        model: Option<String>,
+    ) -> Result<Value, String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((format!("session:{provider}:{name}"), model.clone()));
+        Ok(json!({"model": model}))
+    }
+
+    async fn reset(&self, _: AgentCallContext, _: &str, _: &str) -> Result<Value, String> {
+        Err("not used".into())
+    }
+
+    async fn status(&self, _: AgentCallContext, _: &str, _: &str) -> Result<Value, String> {
+        Err("not used".into())
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentBackend for DelayedAgentBackend {
     async fn run_fresh(
         &self,
         _: AgentCallContext,
         _: &str,
+        _: Option<String>,
         _: Option<String>,
     ) -> Result<Value, String> {
         tokio::time::sleep(Duration::from_millis(75)).await;
@@ -77,6 +125,7 @@ impl AgentBackend for DelayedAgentBackend {
         _: AgentCallContext,
         _: &str,
         _: &str,
+        _: Option<String>,
         _: Option<String>,
     ) -> Result<Value, String> {
         Err("not used".into())
@@ -98,6 +147,7 @@ impl AgentBackend for BlockingAgentBackend {
         _: AgentCallContext,
         _: &str,
         _: Option<String>,
+        _: Option<String>,
     ) -> Result<Value, String> {
         let _cancel = CancelOnDrop(self.cancelled.clone());
         self.started.add_permits(1);
@@ -110,6 +160,7 @@ impl AgentBackend for BlockingAgentBackend {
         _: AgentCallContext,
         _: &str,
         _: &str,
+        _: Option<String>,
         _: Option<String>,
     ) -> Result<Value, String> {
         Err("not used".into())
@@ -442,6 +493,138 @@ async fn private_socket_and_cli_are_thin_clients_of_the_gateway() {
         let _ = shutdown_tx.send(true);
         serving.await.unwrap().unwrap();
         assert!(!action_socket.exists());
+    })
+    .await
+    .unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn provider_failure_is_returned_as_an_agent_error_not_a_successful_review() {
+    let temp = TempDir::new().unwrap();
+    let rpc_socket = temp.path().join("rpc.sock");
+    let action_socket = temp.path().join("warden.sock");
+    let server = MockAppServer::start(rpc_socket.clone()).await.unwrap();
+
+    CodexControl::run(control_config(rpc_socket), move |handle| async move {
+        let gateway = ActionGateway::new(handle, action_socket, Arc::new(NoAgentBackend));
+        let credential = gateway
+            .register_invocation(
+                HookId::parse("provider-failure").unwrap(),
+                source_event(),
+                ActionGrant::default(),
+            )
+            .await
+            .unwrap();
+        let response = gateway
+            .dispatch(GatewayRequest {
+                message_type: "request".into(),
+                protocol_version: ACTION_PROTOCOL_VERSION,
+                id: "provider-failure".into(),
+                method: "agent.run".into(),
+                params: json!({"provider":"claude", "event":source_event()}),
+                context: Some(RequestCredential {
+                    invocation_id: credential.invocation_id,
+                    token: credential.token,
+                }),
+                bridge_auth: None,
+            })
+            .await;
+
+        assert!(!response.ok);
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "agent_failure");
+        assert!(error.message.contains("not configured"));
+    })
+    .await
+    .unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_gateway_forwards_valid_models_and_rejects_empty_models() {
+    let temp = TempDir::new().unwrap();
+    let rpc_socket = temp.path().join("rpc.sock");
+    let action_socket = temp.path().join("warden.sock");
+    let server = MockAppServer::start(rpc_socket.clone()).await.unwrap();
+
+    CodexControl::run(control_config(rpc_socket), move |handle| async move {
+        let backend = Arc::new(ModelRecordingBackend::default());
+        let calls = backend.calls.clone();
+        let gateway = ActionGateway::new(handle, action_socket, backend);
+        let credential = gateway
+            .register_invocation(
+                HookId::parse("model-forwarding").unwrap(),
+                source_event(),
+                ActionGrant::default(),
+            )
+            .await
+            .unwrap();
+        let context = Some(RequestCredential {
+            invocation_id: credential.invocation_id,
+            token: credential.token.clone(),
+        });
+
+        let fresh = gateway
+            .dispatch(GatewayRequest {
+                message_type: "request".into(),
+                protocol_version: ACTION_PROTOCOL_VERSION,
+                id: "fresh-model".into(),
+                method: "agent.run".into(),
+                params: json!({
+                    "provider": "claude",
+                    "model": "  sonnet  ",
+                    "event": source_event(),
+                }),
+                context: context.clone(),
+                bridge_auth: None,
+            })
+            .await;
+        assert!(fresh.ok);
+        assert_eq!(fresh.result.unwrap(), json!({"model":"sonnet"}));
+
+        let persistent = gateway
+            .dispatch(GatewayRequest {
+                message_type: "request".into(),
+                protocol_version: ACTION_PROTOCOL_VERSION,
+                id: "persistent-model".into(),
+                method: "agent.session.send".into(),
+                params: json!({
+                    "provider": "claude",
+                    "name": "reviewer",
+                    "model": "sonnet",
+                    "event": source_event(),
+                }),
+                context: context.clone(),
+                bridge_auth: None,
+            })
+            .await;
+        assert!(persistent.ok);
+
+        let empty = gateway
+            .dispatch(GatewayRequest {
+                message_type: "request".into(),
+                protocol_version: ACTION_PROTOCOL_VERSION,
+                id: "empty-model".into(),
+                method: "agent.run".into(),
+                params: json!({
+                    "provider": "claude",
+                    "model": "  ",
+                    "event": source_event(),
+                }),
+                context,
+                bridge_auth: None,
+            })
+            .await;
+        assert!(!empty.ok);
+        assert_eq!(empty.error.unwrap().code, "invalid_parameter");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ("fresh:claude".into(), Some("sonnet".into())),
+                ("session:claude:reviewer".into(), Some("sonnet".into())),
+            ]
+        );
     })
     .await
     .unwrap();

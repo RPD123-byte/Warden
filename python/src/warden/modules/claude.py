@@ -14,19 +14,21 @@ async def run(
     event: HookEvent | Mapping[str, Any],
     *,
     prompt: str = "",
+    model: str | None = None,
     warden: _Requester | None = None,
 ) -> Any:
     """Run fresh Claude inference through the Warden host."""
 
-    return await _run("claude", event, prompt=prompt, warden=warden)
+    return await _run("claude", event, prompt=prompt, model=model, warden=warden)
 
 
 def session(
     name: str,
     *,
     prompt: str = "",
+    model: str | None = None,
     warden: _Requester | None = None,
 ) -> AgentSession:
     """Reference a named persistent Claude conversation owned by Warden."""
 
-    return _session("claude", name, prompt=prompt, warden=warden)
+    return _session("claude", name, prompt=prompt, model=model, warden=warden)

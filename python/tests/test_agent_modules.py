@@ -46,6 +46,40 @@ def test_fresh_agent_helpers_request_host_service_with_full_event():
     assert params["prompt"] == "find risks"
     assert params["event"] == event().to_dict()
     assert "options" not in params
+    assert "model" not in params
+
+
+def test_claude_helpers_send_trimmed_model_for_fresh_and_persistent_calls():
+    async def scenario():
+        host = FakeWarden()
+        await claude.run(event(), model="  sonnet  ", warden=host)
+        session = claude.session("reviewer", model="sonnet", warden=host)
+        await session.send(event())
+        return host
+
+    host = asyncio.run(scenario())
+
+    assert host.requests[0][1]["model"] == "sonnet"
+    assert host.requests[1][1]["model"] == "sonnet"
+
+
+def test_claude_helpers_reject_empty_or_non_string_models():
+    async def empty_fresh():
+        await claude.run(event(), model="  ", warden=FakeWarden())
+
+    try:
+        asyncio.run(empty_fresh())
+    except ValueError as error:
+        assert "non-empty" in str(error)
+    else:
+        raise AssertionError("empty model must fail")
+
+    try:
+        claude.session("reviewer", model=42)
+    except TypeError as error:
+        assert "string or None" in str(error)
+    else:
+        raise AssertionError("non-string model must fail")
 
 
 def test_named_session_requests_persistent_host_service_and_lifecycle_operations():

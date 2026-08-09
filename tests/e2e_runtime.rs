@@ -294,7 +294,11 @@ async fn hot_created_marker_routes_one_selected_turn_and_not_the_next() {
         assert!(lines.contains("\"raw_method\":\"item/completed\""));
 
         let health = daemon_health(&paths.action_socket).await;
-        assert_eq!(health["daemon"]["hooks_ready"], 1);
+        assert_eq!(
+            health["daemon"]["hooks_ready"],
+            2,
+            "the hot-created hook and bundled template must both be ready"
+        );
         assert!(health["daemon"]["last_processed_sequence"].as_u64().unwrap() > 0);
         assert_eq!(health["daemon"]["coverage_gap_count"], 0);
 

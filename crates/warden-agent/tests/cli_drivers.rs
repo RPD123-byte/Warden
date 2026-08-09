@@ -126,20 +126,20 @@ async fn claude_starts_then_resumes_a_persistent_session() {
     let driver = ClaudeCliDriver::new(config);
 
     let first = driver
-        .invoke(AgentRequest::persistent(
-            AgentInput::new(1, json!({"event":1})),
-            None,
-        ))
+        .invoke(
+            AgentRequest::persistent(AgentInput::new(1, json!({"event":1})), None)
+                .with_model(Some("sonnet".into())),
+        )
         .await
         .expect("start session");
     let resume = first.resume.expect("Claude resume metadata");
     assert_eq!(resume.session_id, "claude-session");
 
     driver
-        .invoke(AgentRequest::persistent(
-            AgentInput::new(2, json!({"event":2})),
-            Some(resume),
-        ))
+        .invoke(
+            AgentRequest::persistent(AgentInput::new(2, json!({"event":2})), Some(resume))
+                .with_model(Some("sonnet".into())),
+        )
         .await
         .expect("resume session");
 
@@ -150,8 +150,39 @@ async fn claude_starts_then_resumes_a_persistent_session() {
         .collect();
     assert_eq!(invocations.len(), 2);
     assert!(invocations[0].contains("--session-id"));
+    assert!(invocations[0].contains("--model sonnet"));
     assert!(!invocations[0].contains("--no-session-persistence"));
     assert!(invocations[1].contains("--resume claude-session"));
+    assert!(invocations[1].contains("--model sonnet"));
+}
+
+#[tokio::test]
+async fn claude_fresh_call_accepts_an_explicit_model_without_changing_defaults() {
+    let directory = tempdir().expect("temp dir");
+    let script = write_script(&directory, "claude.sh", CLAUDE_SCRIPT);
+    let args_log = directory.path().join("args.log");
+    let input_log = directory.path().join("input.log");
+    let config = shell_config(&script, Duration::from_secs(2))
+        .with_env("ARGS_LOG", &args_log)
+        .with_env("INPUT_LOG", &input_log);
+    let driver = ClaudeCliDriver::new(config);
+
+    driver
+        .invoke(
+            AgentRequest::fresh(AgentInput::new(1, json!({"event":1})))
+                .with_model(Some("sonnet".into())),
+        )
+        .await
+        .expect("explicit model call");
+    driver
+        .invoke(AgentRequest::fresh(AgentInput::new(2, json!({"event":2}))))
+        .await
+        .expect("default model call");
+
+    let invocations = fs::read_to_string(args_log).expect("args log");
+    let invocations = invocations.lines().collect::<Vec<_>>();
+    assert!(invocations[0].contains("--model sonnet"));
+    assert!(!invocations[1].contains("--model"));
 }
 
 #[tokio::test]
@@ -232,6 +263,7 @@ async fn timeout_and_interrupt_terminate_only_the_target_invocation() {
         invocation_id,
         input: AgentInput::new(2, json!({"slow":true})),
         conversation: Conversation::Fresh,
+        model: None,
         environment: InvocationEnvironment::default(),
     };
     let running_driver = Arc::clone(&driver);
@@ -281,6 +313,7 @@ async fn timeout_interrupt_shutdown_and_drop_do_not_leave_provider_descendants()
         invocation_id: interrupt_id,
         input: AgentInput::new(2, json!({})),
         conversation: Conversation::Fresh,
+        model: None,
         environment: InvocationEnvironment::default(),
     };
     let running_driver = Arc::clone(&interrupt_driver);

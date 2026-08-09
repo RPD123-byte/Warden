@@ -11,7 +11,8 @@ you want. Warden installs an authoring skill that teaches the AI how to create i
 ```mermaid
 flowchart LR
     S["Run warden start"] --> O["Warden onboards Codex"]
-    O --> A["Tell your AI to create a hook"]
+    O --> B["Bundled template hooks are immediately available"]
+    O --> A["Tell your AI to create another hook"]
     A --> H["AI writes hook.py"]
     H --> W["Warden validates and publishes it"]
     W --> M["Warden generates a selectable marker skill"]
@@ -56,14 +57,18 @@ warden start
 Startup is also the idempotent Codex onboarding flow. It:
 
 - creates Warden's local directories under `~/.warden`;
+- installs any missing bundled hook templates under `~/.warden/warden-hooks`;
 - installs or updates the global `create-warden-hook` Codex authoring skill;
 - installs and trusts Warden's four generic Codex bridge hooks;
 - attaches Warden's generated marker-skill directory to Codex; and
 - starts watching authored hooks and ingesting Codex events.
 
-Running startup again is safe. It preserves authored hooks, generated markers, unrelated Codex
-skills, and unrelated native hooks. Normal startup only attaches to Codex's shared app-server; it
-does not quit or restart Codex Desktop.
+Running startup again is safe. A bundled template is copied only when its whole destination hook
+directory is absent. If you edit a template—or even leave an incomplete directory with the same
+name—Warden treats that directory as user-owned and never merges or overwrites it. Deleting the
+whole directory opts into reinstalling the current bundled copy on the next startup. Warden also
+preserves other authored hooks, unrelated Codex skills, and unrelated native hooks. Normal startup
+only attaches to Codex's shared app-server; it does not quit or restart Codex Desktop.
 
 In another terminal, verify the connection:
 
@@ -75,6 +80,33 @@ Look for `"phase": "connected"`. Under `daemon.bridge`, `configured`, `trusted`,
 `loaded_confirmed` should be `true`. If `restart_required` is `true`, start a new Codex task or
 deliberately restart Codex before expecting blocking hooks to pause an already-running task. Hook
 code itself hot-updates after the generic bridge has loaded.
+
+### Bundled `unspecified-decisions` template
+
+The first bundled template is immediately selectable as `unspecified-decisions` after startup. It
+is a blocking implementation monitor that runs after successful tool calls, failed tool calls, and
+completed agent responses. It uses one persistent Claude Sonnet conversation per source Codex task.
+On its first selected event it reads that task's retained history, treats the initial request and
+available specifications as the baseline, and checks later actions for consequential product,
+architecture, interface, dependency, code-layout, or file-layout choices the baseline did not make.
+
+When Claude finds such a decision, it first steers the active Codex turn with the reason and exactly
+one question for the user, then interrupts the turn. Its only grants are current-task history,
+current-turn steer, and current-turn interrupt. If the retained history has a gap that prevents a
+trustworthy baseline, it stops and asks which request or specification governs the work instead of
+guessing.
+
+Select this marker on every user message you want monitored:
+
+```text
+[$unspecified-decisions](/Users/you/.warden/generated-skills/unspecified-decisions/SKILL.md)
+```
+
+Like every Warden hook, it is active for that message's turn only. Its Claude conversation remains
+available for later marked turns in the same Codex task, but receives nothing from unmarked turns.
+The editable installed source is `~/.warden/warden-hooks/unspecified-decisions/hook.py`; the
+canonical source shipped by this repository is
+[`.warden/warden-hooks/unspecified-decisions/hook.py`](.warden/warden-hooks/unspecified-decisions/hook.py).
 
 ### Only when Codex is not attached
 
@@ -111,7 +143,8 @@ Tell the AI the following when they matter; otherwise it will ask or use the saf
   assistant response, or completed/failed/interrupted turn.
 - **Blocking:** whether Codex must wait for the hook. The default is non-blocking.
 - **Agent:** no agent, fresh Claude/Codex inference for every matching event, or a named persistent
-  session that retains context across selected turns.
+  session that retains context across selected turns. Claude-backed hooks may explicitly choose a
+  model such as Sonnet; omitting it uses the Claude CLI's configured default.
 - **Dependencies:** any third-party Python packages the hook needs.
 - **Warden actions:** which Codex observation or control actions an agent-backed hook may call.
   `None` is the default; cross-task access is never inferred.
@@ -170,8 +203,8 @@ are generated skills.
   waiting.
 - A **blocking** hook makes Warden wait for completion. At native `UserPromptSubmit`, `PreToolUse`,
   successful `PostToolUse`, and final assistant-response boundaries, that also pauses Codex itself.
-- Failure and terminal events can still be processed in order, but cannot pause work that already
-  finished.
+- Failed-tool, terminal, and intermediate observed assistant events can still be processed in order,
+  but cannot retroactively pause work that already finished.
 
 Blocking is configured per hook and works for every supported event kind, subject to whether Codex
 provides a synchronous native boundary for that event.

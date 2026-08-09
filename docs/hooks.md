@@ -138,7 +138,11 @@ from warden.modules import claude
 
 @hook(on=[HookEventKind.AGENT_MESSAGE_COMPLETED])
 async def review(event) -> None:
-    await claude.run(event, prompt="Find unsupported claims in this response.")
+    await claude.run(
+        event,
+        prompt="Find unsupported claims in this response.",
+        model="sonnet",
+    )
 ```
 
 Each `run` call starts without conversational state from an earlier call. Use `codex.run` for the same behavior through the Codex CLI.
@@ -153,6 +157,7 @@ from warden.modules import claude
 monitor = claude.session(
     "architecture-monitor",
     prompt="Track architectural decisions and contradictions.",
+    model="sonnet",
 )
 
 
@@ -160,6 +165,8 @@ monitor = claude.session(
 async def monitor_architecture(event) -> None:
     await monitor.send(event)
 ```
+
+`model` is optional for Claude calls; omitting it leaves selection to the Claude CLI default. A named persistent session binds its model on first use and rejects later attempts to resume that same hook/session/task conversation with another model.
 
 Persistent sessions are keyed by provider, hook, session name, and source Codex task. Sends are serialized in source order. They can retain growing context and incur growing usage, so keep persistence explicit and use session status or reset operations when needed. Warden durably records an in-progress send before invoking the provider and publishes the resulting session state before advancing its in-memory cursor. If that commit becomes ambiguous, the session fails observably and remains unavailable across daemon restarts until it is explicitly reset; unrelated sessions continue normally.
 

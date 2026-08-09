@@ -103,6 +103,10 @@ impl ClaudeCliDriver {
             "--verbose".into(),
         ];
         args.extend(self.extra_args.iter().cloned());
+        if let Some(model) = &request.model {
+            args.push("--model".into());
+            args.push(model.into());
+        }
 
         match &request.conversation {
             Conversation::Fresh => {

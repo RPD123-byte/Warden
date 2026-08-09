@@ -1339,6 +1339,7 @@ dependencies = [
  "fs2",
  "hex",
  "notify",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

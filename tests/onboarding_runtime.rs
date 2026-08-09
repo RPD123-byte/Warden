@@ -90,6 +90,14 @@ async fn first_startup_attaches_markers_trusts_exact_bridge_hashes_and_reports_r
                 .is_file()
         );
         assert!(paths.native_hooks.join("bridge.py").is_file());
+        assert!(paths.hooks.join("unspecified-decisions/hook.py").is_file());
+        let marker = std::fs::read_to_string(
+            paths
+                .generated_skills
+                .join("unspecified-decisions/SKILL.md"),
+        )
+        .unwrap();
+        assert!(marker.trim().ends_with(warden_daemon::MARKER_BODY));
 
         let health = tokio::process::Command::new(env!("CARGO_BIN_EXE_warden"))
             .args(["--socket", socket_for_health.to_str().unwrap(), "health"])

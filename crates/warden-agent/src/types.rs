@@ -176,6 +176,7 @@ pub struct AgentRequest {
     pub invocation_id: Uuid,
     pub input: AgentInput,
     pub conversation: Conversation,
+    pub model: Option<String>,
     pub environment: InvocationEnvironment,
 }
 
@@ -186,6 +187,7 @@ impl AgentRequest {
             invocation_id: Uuid::new_v4(),
             input,
             conversation: Conversation::Fresh,
+            model: None,
             environment: InvocationEnvironment::default(),
         }
     }
@@ -196,6 +198,7 @@ impl AgentRequest {
             invocation_id: Uuid::new_v4(),
             input,
             conversation: Conversation::Persistent { resume },
+            model: None,
             environment: InvocationEnvironment::default(),
         }
     }
@@ -203,6 +206,12 @@ impl AgentRequest {
     #[must_use]
     pub fn with_environment(mut self, environment: InvocationEnvironment) -> Self {
         self.environment = environment;
+        self
+    }
+
+    #[must_use]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
         self
     }
 }
@@ -255,6 +264,8 @@ impl SessionKey {
 pub struct SessionSnapshot {
     pub resume: ResumeMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_successful_source_epoch: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_successful_source_sequence: Option<u64>,
@@ -282,6 +293,12 @@ pub enum AgentError {
 
     #[error("persistent {provider} call did not return resumable session metadata")]
     MissingResumeMetadata { provider: ProviderKind },
+
+    #[error("persistent session model {requested:?} does not match its bound model {bound:?}")]
+    SessionModelMismatch {
+        requested: Option<String>,
+        bound: Option<String>,
+    },
 
     #[error(
         "source sequence {incoming} is not newer than the session's last successful sequence {last}"

@@ -20,19 +20,21 @@ async def run(
     event: HookEvent | Mapping[str, Any],
     *,
     prompt: str = "",
+    model: str | None = None,
     warden: _Requester | None = None,
 ) -> Any:
     """Request a fresh provider conversation from the Warden host."""
 
     client = warden or get_current_client()
-    return await client.request(
-        "agent.run",
-        {
-            "provider": provider,
-            "event": _event_dict(event),
-            "prompt": _prompt(prompt),
-        },
-    )
+    params = {
+        "provider": provider,
+        "event": _event_dict(event),
+        "prompt": _prompt(prompt),
+    }
+    selected_model = _model(model)
+    if selected_model is not None:
+        params["model"] = selected_model
+    return await client.request("agent.run", params)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,7 @@ class AgentSession:
     provider: str
     name: str
     prompt: str = ""
+    model: str | None = None
     warden: _Requester | None = None
 
     async def send(
@@ -51,15 +54,15 @@ class AgentSession:
         prompt: str | None = None,
     ) -> Any:
         client = self.warden or get_current_client()
-        return await client.request(
-            "agent.session.send",
-            {
-                "provider": self.provider,
-                "name": self.name,
-                "event": _event_dict(event),
-                "prompt": self.prompt if prompt is None else _prompt(prompt),
-            },
-        )
+        params = {
+            "provider": self.provider,
+            "name": self.name,
+            "event": _event_dict(event),
+            "prompt": self.prompt if prompt is None else _prompt(prompt),
+        }
+        if self.model is not None:
+            params["model"] = self.model
+        return await client.request("agent.session.send", params)
 
     async def reset(self) -> Any:
         client = self.warden or get_current_client()
@@ -79,6 +82,7 @@ def session(
     name: str,
     *,
     prompt: str = "",
+    model: str | None = None,
     warden: _Requester | None = None,
 ) -> AgentSession:
     if not isinstance(name, str) or not name.strip():
@@ -87,6 +91,7 @@ def session(
         provider=provider,
         name=name.strip(),
         prompt=_prompt(prompt),
+        model=_model(model),
         warden=warden,
     )
 
@@ -103,3 +108,14 @@ def _prompt(prompt: str) -> str:
     if not isinstance(prompt, str):
         raise TypeError("prompt must be a string")
     return prompt
+
+
+def _model(model: str | None) -> str | None:
+    if model is None:
+        return None
+    if not isinstance(model, str):
+        raise TypeError("model must be a string or None")
+    model = model.strip()
+    if not model:
+        raise ValueError("model must be a non-empty string when supplied")
+    return model

@@ -67,6 +67,7 @@ impl Warden {
         tracing::info!(
             authoring_skill = %onboarding.authoring_skill.display(),
             skill_changed = onboarding.skill_changed,
+            hook_templates = ?onboarding.hook_templates,
             native_hooks = %onboarding.native_hooks.hooks_file.display(),
             bridge_changed = onboarding.native_hooks.changed,
             restart_required = onboarding.native_hooks.changed,
@@ -587,6 +588,7 @@ struct ManagedAgents {
     restore_lock: tokio::sync::Mutex<()>,
     operation_locks: tokio::sync::Mutex<HashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     source_epoch: uuid::Uuid,
+    next_agent_sequence: AtomicU64,
 }
 
 impl ManagedAgents {
@@ -597,6 +599,7 @@ impl ManagedAgents {
             restore_lock: tokio::sync::Mutex::new(()),
             operation_locks: tokio::sync::Mutex::new(HashMap::new()),
             source_epoch: uuid::Uuid::new_v4(),
+            next_agent_sequence: AtomicU64::new(1),
         }
     }
 
@@ -606,6 +609,15 @@ impl ManagedAgents {
             "codex" => Ok(ProviderKind::Codex),
             _ => Err(format!("unsupported agent provider {value:?}")),
         }
+    }
+
+    fn model(provider: ProviderKind, model: Option<String>) -> Result<Option<String>, String> {
+        if model.is_some() && provider != ProviderKind::Claude {
+            return Err(format!(
+                "explicit model selection is not supported for {provider} agent hooks"
+            ));
+        }
+        Ok(model)
     }
 
     fn key(context: &AgentCallContext, provider: ProviderKind, name: &str) -> SessionKey {
@@ -645,9 +657,12 @@ impl ManagedAgents {
                 actions.join(", ")
             ));
         }
-        Ok(AgentInput::new(context.event.sequence, event)
+        // Native barriers and observed app-server events have independent sequence spaces.
+        // Persistent sends are already serialized by their SessionKey operation lock, so give
+        // agent calls one daemon-local cursor instead of comparing unrelated upstream numbers.
+        let agent_sequence = self.next_agent_sequence.fetch_add(1, Ordering::AcqRel);
+        Ok(AgentInput::new(agent_sequence, event)
             .with_source_epoch(self.source_epoch)
-            .with_source_ordinal(event_ordinal(context.event.kind))
             .with_prompt(guidance))
     }
 
@@ -885,12 +900,14 @@ impl AgentBackend for ManagedAgents {
         context: AgentCallContext,
         provider: &str,
         prompt: Option<String>,
+        model: Option<String>,
     ) -> Result<Value, String> {
         let provider = Self::provider(provider)?;
+        let model = Self::model(provider, model)?;
         let input = self.input(&context, prompt)?;
         let response = self
             .sessions
-            .run_fresh_with_environment(provider, input, Self::environment(&context))
+            .run_fresh_with_options(provider, input, model, Self::environment(&context))
             .await
             .map_err(|error| error.to_string())?;
         serde_json::to_value(response).map_err(|error| error.to_string())
@@ -902,8 +919,10 @@ impl AgentBackend for ManagedAgents {
         provider: &str,
         session_name: &str,
         prompt: Option<String>,
+        model: Option<String>,
     ) -> Result<Value, String> {
         let provider = Self::provider(provider)?;
+        let model = Self::model(provider, model)?;
         let key = Self::key(&context, provider, session_name);
         let operation = self.operation_lock(&key).await;
         let _guard = operation.lock().await;
@@ -913,9 +932,10 @@ impl AgentBackend for ManagedAgents {
         let commit_key = key.clone();
         let response = self
             .sessions
-            .send_persistent_transactional(
+            .send_persistent_transactional_with_model(
                 key.clone(),
                 input.clone(),
+                model,
                 Self::environment(&context),
                 || async { self.begin_pending(&prepare_key, &input) },
                 |snapshot| async { self.commit_snapshot(&commit_key, snapshot) },
@@ -1123,21 +1143,6 @@ fn warden_cli_path() -> PathBuf {
         )
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| PathBuf::from("warden"))
-}
-
-fn event_ordinal(kind: crate::event::HookEventKind) -> u16 {
-    match kind {
-        crate::event::HookEventKind::UserPromptSubmitted => 0,
-        crate::event::HookEventKind::TurnStarted => 1,
-        crate::event::HookEventKind::PreToolUse => 2,
-        crate::event::HookEventKind::PostToolUse => 3,
-        crate::event::HookEventKind::PostToolUseFailure => 4,
-        crate::event::HookEventKind::AgentMessageCompleted => 5,
-        crate::event::HookEventKind::TurnCompleted => 6,
-        crate::event::HookEventKind::TurnFailed => 7,
-        crate::event::HookEventKind::TurnInterrupted => 8,
-        crate::event::HookEventKind::UnknownUpstreamEvent => 9,
-    }
 }
 
 fn log_registry_delta(delta: &crate::registry::RegistryDelta) {
@@ -1359,7 +1364,7 @@ mod tests {
             let first = first.clone();
             tokio::spawn(async move {
                 first
-                    .send_persistent(first_context, "claude", "monitor", None)
+                    .send_persistent(first_context, "claude", "monitor", None, None)
                     .await
             })
         };
@@ -1380,7 +1385,7 @@ mod tests {
         fs::remove_dir(&record_path).unwrap();
 
         let rejected = first
-            .send_persistent(agent_context(11), "claude", "monitor", None)
+            .send_persistent(agent_context(11), "claude", "monitor", None, None)
             .await
             .expect_err("same-daemon continuation must be rejected");
         assert!(rejected.contains("unavailable until reset or recovery"));
@@ -1402,7 +1407,7 @@ mod tests {
         assert!(restart_error.contains("did not commit"), "{restart_error}");
         assert!(
             restarted
-                .send_persistent(agent_context(12), "claude", "monitor", None)
+                .send_persistent(agent_context(12), "claude", "monitor", None, None)
                 .await
                 .expect_err("restart must not resume stale durable state")
                 .contains("unavailable until reset or recovery")
@@ -1417,7 +1422,7 @@ mod tests {
         assert!(!restarted.pending_path(&key).exists());
 
         restarted
-            .send_persistent(agent_context(13), "claude", "monitor", None)
+            .send_persistent(agent_context(13), "claude", "monitor", None, None)
             .await
             .expect("send succeeds after reset");
         assert_eq!(restarted_driver.calls.load(Ordering::SeqCst), 1);
@@ -1450,6 +1455,36 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".session-"))
         );
+    }
+
+    #[tokio::test]
+    async fn persistent_agent_cursor_orders_mixed_native_and_observed_event_spaces() {
+        let temp = TempDir::new().unwrap();
+        let driver = SessionDriver::immediate();
+        let agents = managed_with_driver(temp.path(), driver.clone());
+
+        agents
+            .send_persistent(
+                agent_context(447),
+                "claude",
+                "mixed-events",
+                None,
+                Some("sonnet".into()),
+            )
+            .await
+            .expect("high observed sequence starts the conversation");
+        agents
+            .send_persistent(
+                agent_context(1),
+                "claude",
+                "mixed-events",
+                None,
+                Some("sonnet".into()),
+            )
+            .await
+            .expect("low native receipt sequence remains a later agent invocation");
+
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

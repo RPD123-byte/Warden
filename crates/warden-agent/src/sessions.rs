@@ -11,6 +11,7 @@ use crate::{
 #[derive(Default)]
 struct SessionState {
     resume: Option<ResumeMetadata>,
+    model: Option<String>,
     last_successful_source_epoch: Option<Uuid>,
     last_successful_source_sequence: Option<u64>,
     last_successful_source_ordinal: Option<u16>,
@@ -59,8 +60,23 @@ impl AgentSessions {
         input: AgentInput,
         environment: InvocationEnvironment,
     ) -> Result<AgentResponse, AgentError> {
+        self.run_fresh_with_options(provider, input, None, environment)
+            .await
+    }
+
+    pub async fn run_fresh_with_options(
+        &self,
+        provider: ProviderKind,
+        input: AgentInput,
+        model: Option<String>,
+        environment: InvocationEnvironment,
+    ) -> Result<AgentResponse, AgentError> {
         self.driver(provider)?
-            .invoke(AgentRequest::fresh(input).with_environment(environment))
+            .invoke(
+                AgentRequest::fresh(input)
+                    .with_model(model)
+                    .with_environment(environment),
+            )
             .await
     }
 
@@ -84,6 +100,17 @@ impl AgentSessions {
         input: AgentInput,
         environment: InvocationEnvironment,
     ) -> Result<AgentResponse, AgentError> {
+        self.send_persistent_with_options(key, input, None, environment)
+            .await
+    }
+
+    pub async fn send_persistent_with_options(
+        &self,
+        key: SessionKey,
+        input: AgentInput,
+        model: Option<String>,
+        environment: InvocationEnvironment,
+    ) -> Result<AgentResponse, AgentError> {
         let driver = self.driver(key.provider)?;
         let provider = key.provider;
         let slot = {
@@ -92,6 +119,7 @@ impl AgentSessions {
         };
         let mut state = slot.state.lock().await;
         ensure_available(&state)?;
+        ensure_model(&state, &model)?;
         if state.last_successful_source_epoch == input.source_epoch
             && let Some(last) = state.last_successful_source_sequence
             && (input.source_sequence, input.source_ordinal)
@@ -106,6 +134,7 @@ impl AgentSessions {
         let response = driver
             .invoke(
                 AgentRequest::persistent(input.clone(), state.resume.clone())
+                    .with_model(model.clone())
                     .with_environment(environment),
             )
             .await?;
@@ -120,6 +149,7 @@ impl AgentSessions {
             });
         }
         state.resume = Some(resume);
+        state.model = model;
         state.last_successful_source_epoch = input.source_epoch;
         state.last_successful_source_sequence = Some(input.source_sequence);
         state.last_successful_source_ordinal = Some(input.source_ordinal);
@@ -147,6 +177,37 @@ impl AgentSessions {
         Commit: FnOnce(SessionSnapshot) -> CommitFuture + Send,
         CommitFuture: Future<Output = Result<(), String>> + Send,
     {
+        self.send_persistent_transactional_with_model(
+            key,
+            input,
+            None,
+            environment,
+            prepare,
+            commit,
+        )
+        .await
+    }
+
+    pub async fn send_persistent_transactional_with_model<
+        Prepare,
+        PrepareFuture,
+        Commit,
+        CommitFuture,
+    >(
+        &self,
+        key: SessionKey,
+        input: AgentInput,
+        model: Option<String>,
+        environment: InvocationEnvironment,
+        prepare: Prepare,
+        commit: Commit,
+    ) -> Result<AgentResponse, AgentError>
+    where
+        Prepare: FnOnce() -> PrepareFuture + Send,
+        PrepareFuture: Future<Output = Result<(), String>> + Send,
+        Commit: FnOnce(SessionSnapshot) -> CommitFuture + Send,
+        CommitFuture: Future<Output = Result<(), String>> + Send,
+    {
         let driver = self.driver(key.provider)?;
         let provider = key.provider;
         let slot = {
@@ -155,6 +216,7 @@ impl AgentSessions {
         };
         let mut state = slot.state.lock().await;
         ensure_available(&state)?;
+        ensure_model(&state, &model)?;
         if state.last_successful_source_epoch == input.source_epoch
             && let Some(last) = state.last_successful_source_sequence
             && (input.source_sequence, input.source_ordinal)
@@ -172,6 +234,7 @@ impl AgentSessions {
         let response = match driver
             .invoke(
                 AgentRequest::persistent(input.clone(), state.resume.clone())
+                    .with_model(model.clone())
                     .with_environment(environment),
             )
             .await
@@ -200,6 +263,7 @@ impl AgentSessions {
         }
         let snapshot = SessionSnapshot {
             resume,
+            model,
             last_successful_source_epoch: input.source_epoch,
             last_successful_source_sequence: Some(input.source_sequence),
             last_successful_source_ordinal: Some(input.source_ordinal),
@@ -210,6 +274,7 @@ impl AgentSessions {
         }
 
         state.resume = Some(snapshot.resume);
+        state.model = snapshot.model;
         state.last_successful_source_epoch = snapshot.last_successful_source_epoch;
         state.last_successful_source_sequence = snapshot.last_successful_source_sequence;
         state.last_successful_source_ordinal = snapshot.last_successful_source_ordinal;
@@ -227,6 +292,7 @@ impl AgentSessions {
         }
         state.resume.clone().map(|resume| SessionSnapshot {
             resume,
+            model: state.model.clone(),
             last_successful_source_epoch: state.last_successful_source_epoch,
             last_successful_source_sequence: state.last_successful_source_sequence,
             last_successful_source_ordinal: state.last_successful_source_ordinal,
@@ -250,6 +316,7 @@ impl AgentSessions {
         ensure_available(&state)?;
         Ok(state.resume.clone().map(|resume| SessionSnapshot {
             resume,
+            model: state.model.clone(),
             last_successful_source_epoch: state.last_successful_source_epoch,
             last_successful_source_sequence: state.last_successful_source_sequence,
             last_successful_source_ordinal: state.last_successful_source_ordinal,
@@ -285,6 +352,7 @@ impl AgentSessions {
         let slot = Arc::new(SessionSlot {
             state: Mutex::new(SessionState {
                 resume: Some(snapshot.resume),
+                model: snapshot.model,
                 last_successful_source_epoch: snapshot.last_successful_source_epoch,
                 last_successful_source_sequence: snapshot.last_successful_source_sequence,
                 last_successful_source_ordinal: snapshot.last_successful_source_ordinal,
@@ -329,4 +397,14 @@ fn ensure_available(state: &SessionState) -> Result<(), AgentError> {
         }),
         None => Ok(()),
     }
+}
+
+fn ensure_model(state: &SessionState, requested: &Option<String>) -> Result<(), AgentError> {
+    if state.resume.is_some() && state.model != *requested {
+        return Err(AgentError::SessionModelMismatch {
+            requested: requested.clone(),
+            bound: state.model.clone(),
+        });
+    }
+    Ok(())
 }
