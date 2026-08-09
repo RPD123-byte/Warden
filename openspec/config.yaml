@@ -2,7 +2,7 @@ schema: spec-driven
 
 context: |
   This project is a long-running local Rust host daemon built on the codex-control
-  package from https://github.com/RPD123-byte/Warden, whose local dependency checkout
+  package from https://github.com/RPD123-byte/codex-warden, whose local dependency checkout
   is /Users/computer/codex-app-control.
 
   The dependency already provides shared Codex app-server transport, authoritative

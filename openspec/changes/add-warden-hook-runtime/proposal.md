@@ -28,7 +28,7 @@ None.
 ## Impact
 
 - Creates the host daemon and hook runtime in this repository.
-- Adds a Git/Cargo dependency on `RPD123-byte/Warden` (`codex-control`) and builds on its `Arc<SequencedEvent>`, event store, streams, snapshots, and `start`/`steer`/`interrupt` APIs.
+- Adds a Git/Cargo dependency on `RPD123-byte/codex-warden` (`codex-control`) and builds on its `Arc<SequencedEvent>`, event store, streams, snapshots, and `start`/`steer`/`interrupt` APIs.
 - Requires a small dependency integration addition for app-server skill-root attachment if `codex-control` does not expose the necessary generic request through its public `Handle`.
 - Adds local Python environment/process management and Claude/Codex CLI subprocess integration.
 - Adds generated local Codex skill files, but does not write to or hot-reload Codex native `hooks.json` definitions.

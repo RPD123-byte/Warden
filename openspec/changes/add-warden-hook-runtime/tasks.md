@@ -1,6 +1,6 @@
 ## 1. Host and Dependency Foundation
 
-- [x] 1.1 Create the Rust host daemon workspace and add a pinned Git/Cargo dependency on the `codex-control` package from `RPD123-byte/Warden`.
+- [x] 1.1 Create the Rust host daemon workspace and add a pinned Git/Cargo dependency on the `codex-control` package from `RPD123-byte/codex-warden`.
 - [x] 1.2 Add typed skill-root attachment and forced skill-refresh operations to the `codex-control` dependency, with mock app-server contract tests for initial connection and reconnection.
 - [x] 1.3 Pin the compatible dependency revision in the host and add a compile-time integration test covering event streams, snapshots, retained-event queries, and `start`/`steer`/`interrupt` actions.
 - [x] 1.4 Implement daemon configuration, local data roots, graceful startup/shutdown, and health reporting without duplicating `codex-control` transport supervision.
