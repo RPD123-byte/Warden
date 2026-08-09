@@ -1,6 +1,6 @@
 ## Context
 
-See `proposal.md` for motivation. Warden already performs startup reconciliation before its first hook-registry refresh, embeds the hook-authoring skill in the CLI, generates marker skills from discovered authored hooks, and exposes authenticated current-task history/steer/interrupt actions to hook-owned agent subprocesses. Persistent provider sessions are keyed by provider, hook, logical session name, and source Codex task.
+See `proposal.md` for motivation. Warden already performs startup reconciliation before its first hook-registry refresh, embeds the hook-authoring skill in the CLI, generates marker skills from discovered authored hooks, and exposes authenticated current-task history/start/interrupt actions to hook-owned agent subprocesses. Persistent provider sessions are keyed by provider, hook, logical session name, and source Codex task.
 
 The missing pieces are a source-controlled template catalog, non-destructive installation into the selected Warden home, and per-hook Claude model selection. The codex-control dependency already supplies event ingestion and the native barriers/actions needed here; this change belongs entirely in Warden.
 
@@ -12,7 +12,7 @@ The missing pieces are a source-controlled template catalog, non-destructive ins
 - Keep checked-in templates inspectable while making the compiled CLI self-contained.
 - Preserve all existing user-authored hook content.
 - Make the monitoring conversation durable per source Codex task and explicitly use Claude Sonnet.
-- Make the stop path visible and ordered: explain/ask first, interrupt second.
+- Make the stop path visible and ordered: interrupt the implementation turn, then durably deliver the explanation and question in a fresh turn.
 
 **Non-Goals:**
 
@@ -72,7 +72,7 @@ The template exports one async function decorated for:
 - `POST_TOOL_USE_FAILURE`
 - `AGENT_MESSAGE_COMPLETED`
 - `blocking=True`
-- grants for `CURRENT_THREAD_HISTORY`, `TURN_STEER`, and `TURN_INTERRUPT`
+- grants for `CURRENT_THREAD_HISTORY`, `TURN_INTERRUPT`, and `TURN_START`
 
 The function sends the exact `HookEvent` to `claude.session("unspecified-decision-monitor", model="sonnet", prompt=...)`. No YAML, process-lifetime field, event transform, dependency manifest, or marker implementation is introduced.
 
@@ -88,11 +88,15 @@ The standing prompt defines consequential unspecified decisions with examples at
 
 If no decision is found, Claude returns without calling an action. If one is found, Claude must:
 
-1. Call `turn_steer` with a concise explanation and exactly one question Codex must ask the user.
-2. Inspect the action result.
-3. Call `turn_interrupt` as its final Warden action so implementation cannot continue in that turn.
+1. Call `turn_interrupt` so implementation cannot continue in the source turn.
+2. Inspect the action result and wait for the source turn to become terminal.
+3. Call `turn_start` with a concise explanation and exactly one question, instructing Codex to present it without resuming implementation.
 
 The template does not grant thread listing or arbitrary-thread actions. Warden's existing injected CLI restriction and invocation credential enforce those grants; prompt text is not the authority boundary.
+
+`turn_steer` is deliberately not used for stop-message delivery. Its accepted result means the input was queued for the active turn; immediately interrupting that turn can discard the queue before Codex consumes it. A new turn created only after interruption is terminal survives that boundary and makes the question visible in task history.
+
+Interrupting the source turn also terminates the Codex-owned native bridge process that is waiting for the hook response. Warden therefore treats an authenticated native event as owned work once accepted: losing that client socket does not cancel its bounded hook invocation. This lets the same Claude call finish `turn_start` and commit its durable session. The normal hook timeout still terminates hung work, while disconnect cancellation remains in effect for ordinary action and agent RPC clients.
 
 ```mermaid
 sequenceDiagram
@@ -113,16 +117,16 @@ sequenceDiagram
         H-->>W: hook complete
         W-->>C: release native barrier when present
     else unspecified decision or unsafe missing baseline
-        S->>W: turn_steer(reason + one question)
-        W-->>S: action outcome
         S->>W: turn_interrupt
-        W-->>C: stop active turn
+        W-->>S: source turn terminal
+        S->>W: turn_start(reason + one question)
+        W-->>C: fresh question-only turn
     end
 ```
 
 ### 8. Test deterministic boundaries separately from live model judgment
 
-Unit/integration tests will verify template installation, preservation, marker discovery, metadata, model argv, session binding, and action ordering with isolated homes and fake provider executables/action gateways. An opt-in live smoke test will use the locally authenticated Claude CLI and a disposable controlled Codex task to prove the shipped template can preserve context, steer, and interrupt without making the ordinary test suite depend on a subscription or model variability.
+Unit/integration tests will verify template installation, preservation, marker discovery, metadata, model argv, session binding, and action ordering with isolated homes and fake provider executables/action gateways. An opt-in live smoke test will use the locally authenticated Claude CLI and a disposable controlled Codex task to prove the shipped template can preserve context, interrupt, and visibly deliver its question in a fresh turn without making the ordinary test suite depend on a subscription or model variability.
 
 ## Risks / Trade-offs
 
@@ -131,7 +135,8 @@ Unit/integration tests will verify template installation, preservation, marker d
 - **Failed-tool and intermediate observed agent events may arrive without a native barrier** → Run the requested blocking hook but report this limitation accurately; successful post-tool and final agent-response native events hold their barriers.
 - **A user's copy does not receive template improvements** → Preserve user ownership by design; deleting or renaming the directory allows the next startup to install the current template.
 - **History retention may omit the baseline in a long-running task** → Detect the gap and stop for a baseline restatement instead of approving work against incomplete context.
-- **Steering can be rejected if Codex no longer considers the turn active** → Preserve and report the action outcome, then still request interruption; tests cover the supported native-barrier paths.
+- **The follow-up turn can be rejected or have an unknown outcome** → Inspect and report both action outcomes and never claim the question was delivered unless the new turn was accepted; deterministic and live tests inspect the actual task history.
+- **Interrupting the source turn destroys the waiting native bridge process** → Continue the accepted native invocation independently of that socket, retain the configured execution timeout, and regression-test that `turn_start` and the persistent-session commit still finish after disconnect.
 
 ## Migration Plan
 

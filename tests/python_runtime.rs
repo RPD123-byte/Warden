@@ -488,3 +488,74 @@ async fn hook_capacity_applies_backpressure_instead_of_dropping_deliveries() {
     assert_eq!(second.result, json!(2));
     python.shutdown().await;
 }
+
+#[tokio::test]
+async fn cancelling_an_invoke_cannot_leak_its_worker_response_into_the_next_invoke() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    config.paths.create_all().unwrap();
+    write_hook(
+        &config.paths.hooks,
+        "cancel-safe",
+        "import time\nfrom warden import hook, HookEventKind\n@hook(on=HookEventKind.USER_PROMPT_SUBMITTED)\ndef run(event):\n    if event.sequence == 1:\n        time.sleep(0.25)\n    return event.sequence\n",
+    );
+    let python = Arc::new(PythonRuntime::new(&config));
+    let registry = HookRegistry::new(
+        config.paths.hooks.clone(),
+        config.paths.modules.clone(),
+        config.paths.generated_skills.clone(),
+        config.paths.runtimes.clone(),
+        python.clone(),
+    );
+    registry.refresh().await.unwrap();
+    let revision = registry
+        .current(&HookId::parse("cancel-safe").unwrap())
+        .await
+        .unwrap();
+
+    let mut cancelled = Box::pin(python.invoke(revision.clone(), event(1), credential(&config)));
+    tokio::select! {
+        result = &mut cancelled => panic!("slow invocation completed before cancellation: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    drop(cancelled);
+
+    let replacement = python
+        .invoke(revision, event(2), credential(&config))
+        .await
+        .expect("cancelled worker must be retired before its slot can be reused");
+    assert_eq!(replacement.result, json!(2));
+    python.shutdown().await;
+}
+
+#[tokio::test]
+async fn stale_worker_result_is_drained_before_the_current_invocation_result() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    config.paths.create_all().unwrap();
+    write_hook(
+        &config.paths.hooks,
+        "stale-result",
+        "import os\nfrom warden import hook, HookEventKind\n@hook(on=HookEventKind.USER_PROMPT_SUBMITTED)\ndef run(event):\n    os.write(1, b'{\"type\":\"result\",\"id\":\"cancelled-invocation\",\"ok\":true,\"result\":null}\\n')\n    return event.sequence\n",
+    );
+    let python = Arc::new(PythonRuntime::new(&config));
+    let registry = HookRegistry::new(
+        config.paths.hooks.clone(),
+        config.paths.modules.clone(),
+        config.paths.generated_skills.clone(),
+        config.paths.runtimes.clone(),
+        python.clone(),
+    );
+    registry.refresh().await.unwrap();
+    let revision = registry
+        .current(&HookId::parse("stale-result").unwrap())
+        .await
+        .unwrap();
+
+    let result = python
+        .invoke(revision, event(7), credential(&config))
+        .await
+        .expect("stale response must not corrupt the current invocation");
+    assert_eq!(result.result, json!(7));
+    python.shutdown().await;
+}

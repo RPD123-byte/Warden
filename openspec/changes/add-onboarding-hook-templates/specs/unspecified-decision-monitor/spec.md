@@ -58,7 +58,7 @@ For each subscribed event, the monitor SHALL determine whether the reported acti
 
 #### Scenario: Action follows specified direction
 - **WHEN** the event contains no consequential decision beyond the established review baseline
-- **THEN** the monitor takes no steer or interrupt action
+- **THEN** the monitor takes no interrupt or turn-start action
 - **AND** the blocking invocation completes normally
 
 #### Scenario: Action makes an unspecified decision
@@ -66,17 +66,23 @@ For each subscribed event, the monitor SHALL determine whether the reported acti
 - **THEN** the monitor prepares a concise explanation of the choice and one concrete question needed from the user
 
 ### Requirement: Monitor explains and stops before work continues
-When the monitor identifies an unspecified consequential decision, it SHALL first steer the active Codex turn with a message that explains why work must stop and states the exact question Codex must ask the user, and SHALL then interrupt that turn. The template SHALL receive current-thread-history, turn-steer, and turn-interrupt grants, and no broader Warden action grants.
+When the monitor identifies an unspecified consequential decision, it SHALL interrupt the active implementation turn, wait for an observable terminal result, and then start a fresh turn in the same Codex task carrying a message that explains why work stopped and states the exact question Codex must ask the user. The template SHALL receive current-thread-history, turn-interrupt, and turn-start grants, and no broader Warden action grants.
 
 #### Scenario: Unspecified decision is detected
 - **WHEN** the monitor determines that user direction is required
-- **THEN** it steers the active Codex turn with the stop reason and one user-facing question
-- **AND** only after the steer succeeds or returns an observable result does it request interruption
+- **THEN** it interrupts the active implementation turn
+- **AND** only after interruption returns an observable terminal result does it start a fresh turn carrying the stop reason and one user-facing question
+- **AND** the stop reason and question remain visible in the Codex task after the interrupted turn ends
 - **AND** Codex does not continue implementation in that turn
+
+#### Scenario: Interruption tears down the source turn's native bridge
+- **WHEN** a successful turn-interrupt action closes the native bridge process that submitted the blocking event
+- **THEN** Warden keeps the already-authenticated hook invocation alive within its configured timeout
+- **AND** the monitor can execute its granted turn-start action and commit its persistent Claude session before Warden releases the invocation
 
 #### Scenario: No decision is detected
 - **WHEN** the monitor determines that user direction is not required
-- **THEN** it does not steer or interrupt the Codex turn
+- **THEN** it does not interrupt the Codex turn or start a follow-up turn
 
 #### Scenario: Agent or action execution fails
 - **WHEN** Claude or a granted Warden action fails during a blocking invocation

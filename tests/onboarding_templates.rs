@@ -48,8 +48,8 @@ async fn installed_template_validates_and_generates_its_exact_marker() {
         revision.metadata.actions,
         HashSet::from([
             "current_thread_history".to_owned(),
-            "turn_steer".to_owned(),
             "turn_interrupt".to_owned(),
+            "turn_start".to_owned(),
         ])
     );
     let marker = std::fs::read_to_string(
@@ -60,4 +60,13 @@ async fn installed_template_validates_and_generates_its_exact_marker() {
     )
     .unwrap();
     assert!(marker.trim().ends_with(MARKER_BODY));
+
+    let source =
+        std::fs::read_to_string(config.paths.hooks.join("unspecified-decisions/hook.py")).unwrap();
+    assert!(source.contains("only user-authored instructions and governing specifications"));
+    assert!(source.contains("only an\nactivation marker"));
+    assert!(source.contains("Agent commentary, plans, tool calls, tool results"));
+    assert!(source.contains("Silence and a previous no-action verdict are not approval"));
+    assert!(source.contains("queued steering is\n   discarded"));
+    assert!(source.contains("\"unspecified-decision-monitor-v4\""));
 }

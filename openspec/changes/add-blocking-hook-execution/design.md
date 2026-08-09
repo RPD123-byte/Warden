@@ -116,7 +116,7 @@ For one logical event, Warden resolves matching deliveries once and partitions t
 - Blocking deliveries acquire bounded runtime capacity, start concurrently, and are awaited as a group under the existing per-invocation timeout and cancellation rules.
 - Observer-backed blocking deliveries are awaited by Warden's ordered routing path. Observer-backed non-blocking deliveries are enqueued and routing continues immediately.
 
-The bridge deadline must be longer than Warden's maximum blocking invocation deadline plus a small response margin. If any layer reaches its bound, it cancels/revokes what it owns and returns a fail-open acknowledgement.
+The bridge deadline must be longer than Warden's maximum blocking invocation deadline plus a small response margin. If any layer reaches its bound, it cancels/revokes what it owns and returns a fail-open acknowledgement. Once Warden authenticates and accepts a native event, however, a bridge-client disconnect does not itself cancel the bounded invocation: a hook may have intentionally interrupted its own source turn, which destroys that Codex-owned bridge process before the hook can finish its follow-up actions.
 
 ### 7. Use a bridge-specific local credential
 

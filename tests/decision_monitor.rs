@@ -11,8 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
-use tokio::sync::watch;
-use transport::mock::{MockAppServer, MockThread};
+use tokio::{io::AsyncWriteExt, net::UnixStream, sync::watch};
+use transport::mock::{Fault, MockAppServer, MockThread};
 use warden_agent::{
     AgentInput, AgentSessions, ClaudeCliDriver, CliConfig, InvocationEnvironment, ProviderDriver,
     ProviderKind, SessionKey,
@@ -52,16 +52,17 @@ esac
 
 case "$input" in
   *requires_decision*)
-    printf 'steer\n' >> "$ACTION_LOG"
-    warden action turn_steer --arguments '{"input":[{"type":"text","text":"Stopped: unspecified architecture choice. Question: Which architecture should Codex use?"}]}' >> "$ACTION_RESULT_LOG"
     printf 'interrupt\n' >> "$ACTION_LOG"
     warden action turn_interrupt --arguments '{}' >> "$ACTION_RESULT_LOG"
+    sleep 0.20
+    printf 'start\n' >> "$ACTION_LOG"
+    warden action turn_start --arguments '{"input":[{"type":"text","text":"The Warden supervisor stopped the previous implementation turn. Present this notice and question without resuming implementation: Stopped because architecture was unspecified. Which architecture should Codex use?"}]}' >> "$ACTION_RESULT_LOG"
     ;;
   *missing_baseline*)
-    printf 'steer\n' >> "$ACTION_LOG"
-    warden action turn_steer --arguments '{"input":[{"type":"text","text":"Stopped: the initial review baseline is unavailable. Question: Which request or specification governs this implementation?"}]}' >> "$ACTION_RESULT_LOG"
     printf 'interrupt\n' >> "$ACTION_LOG"
     warden action turn_interrupt --arguments '{}' >> "$ACTION_RESULT_LOG"
+    printf 'start\n' >> "$ACTION_LOG"
+    warden action turn_start --arguments '{"input":[{"type":"text","text":"The Warden supervisor stopped the previous implementation turn. Present this notice and question without resuming implementation: The initial review baseline is unavailable. Which request or specification governs this implementation?"}]}' >> "$ACTION_RESULT_LOG"
     ;;
   *)
     printf 'no_action\n' >> "$ACTION_LOG"
@@ -236,7 +237,7 @@ async fn wait_for(path: &Path) {
 }
 
 #[tokio::test]
-async fn template_blocks_native_events_reuses_context_and_orders_stop_actions() {
+async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() {
     let temp = TempDir::new().unwrap();
     let fake_claude = install_fake_claude(&temp);
     let args_log = temp.path().join("args.log");
@@ -389,18 +390,52 @@ async fn template_blocks_native_events_reuses_context_and_orders_stop_actions() 
         assert_eq!(stop.result.unwrap()["blocking"], 1);
         assert!(stop_started.elapsed() >= Duration::from_millis(140));
 
-        let decision = gateway
-            .dispatch(native_request(
-                "decision-post-tool",
-                json!({
-                    "hook_event_name":"PostToolUse", "session_id":"thread-a",
-                    "turn_id":"turn-thread-a", "cwd":temp.path(), "tool_use_id":"tool-2",
-                    "tool_name":"shell", "tool_response":{"requires_decision":true}
-                }),
-            ))
+        server_for_run
+            .set_fault(Fault::InterruptCompletionBeforeResponse)
             .await;
-        assert!(decision.ok, "{decision:?}");
-        assert_eq!(decision.result.unwrap()["blocking"], 1);
+        let decision = native_request(
+            "decision-post-tool",
+            json!({
+                "hook_event_name":"PostToolUse", "session_id":"thread-a",
+                "turn_id":"turn-thread-a", "cwd":temp.path(), "tool_use_id":"tool-2",
+                "tool_name":"shell", "tool_response":{"requires_decision":true}
+            }),
+        );
+        let mut encoded = serde_json::to_vec(&decision).unwrap();
+        encoded.push(b'\n');
+        let mut bridge = UnixStream::connect(&paths.action_socket).await.unwrap();
+        bridge.write_all(&encoded).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if fs::read_to_string(&action_result_log)
+                    .is_ok_and(|results| !results.trim().is_empty())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "interrupt action did not finish; actions={:?}; inputs={:?}",
+                fs::read_to_string(&action_log),
+                fs::read_to_string(&input_log)
+            )
+        });
+        drop(bridge);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if fs::read_to_string(&action_log)
+                    .is_ok_and(|actions| actions.lines().any(|action| action == "start"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("turn-start must run after interruption disconnects the native bridge");
 
         server_for_run
             .emit_notification(
@@ -440,11 +475,11 @@ async fn template_blocks_native_events_reuses_context_and_orders_stop_actions() 
                 "history",
                 "no_action",
                 "no_action",
-                "steer",
                 "interrupt",
+                "start",
                 "history",
-                "steer",
                 "interrupt",
+                "start",
             ]
         );
         let args = fs::read_to_string(&args_log).unwrap();
@@ -460,28 +495,27 @@ async fn template_blocks_native_events_reuses_context_and_orders_stop_actions() 
         let control_methods = requests
             .iter()
             .filter_map(|request| request["method"].as_str())
-            .filter(|method| matches!(*method, "turn/steer" | "turn/interrupt"))
+            .filter(|method| matches!(*method, "turn/interrupt" | "turn/start"))
             .collect::<Vec<_>>();
         assert_eq!(
             control_methods,
-            ["turn/steer", "turn/interrupt", "turn/steer", "turn/interrupt"]
+            ["turn/interrupt", "turn/start", "turn/interrupt", "turn/start"]
         );
         assert!(
             requests.iter().any(|request| {
-                request["method"] == "turn/steer"
+                request["method"] == "turn/start"
                     && request["params"].to_string().contains("Which architecture")
             }),
-            "the stop explanation and one question must reach Codex"
+            "a fresh Codex turn must durably receive the stop explanation and one question"
         );
         assert!(
             !BRIDGE_EVENTS.contains(&"PostToolUseFailure"),
             "failed-tool events are observer-only and cannot claim a native barrier"
         );
-        assert!(
-            fs::read_to_string(&input_log)
-                .unwrap()
-                .contains("gap` shows that the")
-        );
+        let prompts = fs::read_to_string(&input_log).unwrap();
+        assert!(prompts.contains("only user-authored instructions and governing specifications"));
+        assert!(prompts.contains("Silence and a previous no-action verdict are not approval"));
+        assert!(prompts.contains("baseline is unavailable"));
 
         let _ = shutdown_tx.send(true);
         serving.await.unwrap().unwrap();

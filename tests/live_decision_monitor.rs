@@ -85,6 +85,49 @@ mod macos {
         Ok(())
     }
 
+    async fn wait_for_delivered_question(
+        handle: &codex_control::Handle,
+        thread_id: &str,
+        interrupted_turn_id: &str,
+        expected_question_text: &str,
+    ) -> Result<String, String> {
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let events = handle.query_sequence(Some(thread_id), 0, None).await;
+                for delivery_turn in events.events.iter().filter_map(|event| {
+                    (event.method() == Some("turn/started")
+                        && event.turn_id.as_deref() != Some(interrupted_turn_id))
+                    .then(|| event.turn_id.clone())
+                    .flatten()
+                }) {
+                    let visible_question = events.events.iter().any(|event| {
+                        event.turn_id.as_deref() == Some(&delivery_turn)
+                            && event.frame.raw().to_string().contains("Warden supervisor stopped")
+                            && event
+                                .frame
+                                .raw()
+                                .to_string()
+                                .contains(expected_question_text)
+                    });
+                    let completed = events.events.iter().any(|event| {
+                        event.method() == Some("turn/completed")
+                            && event.turn_id.as_deref() == Some(&delivery_turn)
+                    });
+                    if visible_question && completed {
+                        return delivery_turn;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "no completed follow-up turn visibly delivered question text {expected_question_text:?}"
+            )
+        })
+    }
+
     async fn send_native(
         socket: &std::path::Path,
         credential: &str,
@@ -180,7 +223,7 @@ mod macos {
 
     #[tokio::test]
     #[ignore = "creates a disposable Codex task and invokes local Claude Sonnet twice"]
-    async fn bundled_monitor_blocks_interrupts_and_resumes_one_claude_session() {
+    async fn bundled_monitor_interrupts_delivers_questions_and_resumes_claude() {
         assert_eq!(
             std::env::var("WARDEN_LIVE_DECISION_TEST").as_deref(),
             Ok("1"),
@@ -230,7 +273,7 @@ mod macos {
                     let first = handle
                         .start(
                             &thread_id,
-                            vec![json!({"type":"text","text":"Implementation test: database technology, repository architecture, and file layout are explicitly unresolved and require my answer before any choice. Keep this turn active by running a shell sleep for 120 seconds. Do not approve those unresolved decisions."})],
+                            vec![json!({"type":"text","text":"Implement some MNIST training ML pipeline in a completely different folder real quick. No other specification is provided. Keep this test turn active by running a shell sleep for 120 seconds."})],
                         )
                         .await;
                     if matches!(first, codex_control::ActionOutcome::Rejected { .. }) {
@@ -252,7 +295,7 @@ mod macos {
                         credential.trim(),
                         &thread_id,
                         &first_turn,
-                        "Codex selected PostgreSQL, created src/db/postgres_repository.py, and committed to a repository architecture even though the user has not approved the database, architecture, or file layout.",
+                        "Codex selected PyTorch, a CNN architecture, a src/mnist_pipeline package layout, deterministic train/validation/test splitting, best-checkpoint persistence, and JSON metrics. Codex described these choices in commentary before creating the files, but the user did not select any of them.",
                     )
                     .await;
                     if !first_review.ok || first_review.result.as_ref().unwrap()["blocking"] != 1 {
@@ -262,6 +305,13 @@ mod macos {
                         return Err("first Claude review did not hold the native barrier".into());
                     }
                     wait_for_interrupted(&handle, &thread_id, &first_turn).await?;
+                    wait_for_delivered_question(
+                        &handle,
+                        &thread_id,
+                        &first_turn,
+                        "PyTorch",
+                    )
+                    .await?;
                     let first_snapshot = session_snapshot(&paths);
                     if first_snapshot["snapshot"]["model"] != "sonnet" {
                         return Err(format!("session was not bound to Sonnet: {first_snapshot}"));
@@ -306,6 +356,13 @@ mod macos {
                         return Err(format!("second blocking review failed: {second_review:?}"));
                     }
                     wait_for_interrupted(&handle, &thread_id, &second_turn).await?;
+                    wait_for_delivered_question(
+                        &handle,
+                        &thread_id,
+                        &second_turn,
+                        "Datadog",
+                    )
+                    .await?;
                     let second_snapshot = session_snapshot(&paths);
                     if second_snapshot["snapshot"]["resume"]["session_id"] != session_id {
                         return Err("second review did not resume the first Claude session".into());

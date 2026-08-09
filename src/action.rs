@@ -1008,7 +1008,14 @@ impl ActionGateway {
             writer.shutdown().await?;
             return Ok(());
         }
-        let response = {
+        let native_hook_event = request.method == "warden.native_hook.event";
+        let response = if native_hook_event {
+            // A hook may intentionally interrupt its own source turn and then perform
+            // follow-up actions. Codex tears down that turn's bridge process as soon as
+            // interruption succeeds, so the native request must outlive its client socket.
+            // Invocation timeouts still provide the hard execution bound.
+            self.dispatch(request).await
+        } else {
             let dispatch = self.dispatch(request);
             tokio::pin!(dispatch);
             let disconnected = wait_for_full_disconnect(&mut reader, &writer);
@@ -1021,10 +1028,19 @@ impl ActionGateway {
                 }
             }
         };
-        writer
-            .write_all(&encode_response(response, max_bytes)?)
-            .await?;
-        writer.shutdown().await?;
+        let encoded = encode_response(response, max_bytes)?;
+        if let Err(error) = writer.write_all(&encoded).await {
+            if native_hook_event && is_disconnect_error(&error) {
+                return Ok(());
+            }
+            return Err(ActionError::Io(error));
+        }
+        if let Err(error) = writer.shutdown().await {
+            if native_hook_event && is_disconnect_error(&error) {
+                return Ok(());
+            }
+            return Err(ActionError::Io(error));
+        }
         Ok(())
     }
 }

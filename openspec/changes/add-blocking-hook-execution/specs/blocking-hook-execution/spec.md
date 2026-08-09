@@ -99,6 +99,11 @@ The generic native bridge SHALL use bounded request and invocation deadlines. If
 - **WHEN** a blocking hook awaits an agent beyond the configured invocation bound
 - **THEN** Warden records the timeout, revokes the invocation, responds to the bridge, and allows Codex to continue
 
+#### Scenario: Source-turn interruption disconnects the bridge
+- **WHEN** an accepted blocking native hook interrupts its source turn and Codex closes that turn's bridge process
+- **THEN** Warden continues the invocation within its existing timeout so already-authorized follow-up actions can finish
+- **AND** Warden does not mistake the expected bridge disconnect for hook cancellation
+
 ### Requirement: Bridge trust is exact and readiness is observable
 The system SHALL discover its generated bridge hooks, trust only their exact current hashes through a typed Codex configuration operation, and SHALL NOT enable a global native-hook trust bypass. It SHALL report whether the bridge bundle is absent, untrusted, modified, loaded, or requires a Codex task restart before blocking guarantees are active.
 

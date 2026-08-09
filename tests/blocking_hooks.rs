@@ -612,7 +612,7 @@ async fn pre_and_post_tool_boundaries_wait_only_for_blocking_revisions() {
 }
 
 #[tokio::test]
-async fn disconnect_cancels_blocking_hook_and_replacement_invocation_stays_healthy() {
+async fn disconnect_does_not_cancel_native_blocking_hook_and_replacement_stays_healthy() {
     let temp = TempDir::new().unwrap();
     let rpc_socket = temp.path().join("rpc.sock");
     let server = MockAppServer::start(rpc_socket.clone()).await.unwrap();
@@ -696,21 +696,28 @@ async fn disconnect_cancels_blocking_hook_and_replacement_invocation_stays_healt
         .await
         .unwrap();
         drop(stream);
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        let health = gateway
-            .dispatch(GatewayRequest {
-                message_type: "request".into(),
-                protocol_version: ACTION_PROTOCOL_VERSION,
-                id: "health-after-cancel".into(),
-                method: "warden.health".into(),
-                params: json!({}),
-                context: None,
-                bridge_auth: None,
-            })
-            .await;
-        assert_eq!(health.result.unwrap()["active_invocations"], 0);
-        assert!(!output.is_file());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let health = gateway
+                    .dispatch(GatewayRequest {
+                        message_type: "request".into(),
+                        protocol_version: ACTION_PROTOCOL_VERSION,
+                        id: "health-after-disconnect".into(),
+                        method: "warden.health".into(),
+                        params: json!({}),
+                        context: None,
+                        bridge_auth: None,
+                    })
+                    .await;
+                if health.result.unwrap()["active_invocations"] == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("native hook must finish after its bridge client disconnects");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "finished");
 
         let replacement = gateway
             .dispatch(native_request(&marker, "bridge-secret", "replacement"))

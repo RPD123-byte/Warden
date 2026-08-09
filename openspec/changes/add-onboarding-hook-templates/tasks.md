@@ -17,14 +17,15 @@
 
 - [x] 3.1 Validate the installed template through the real Python registry and assert its three event kinds, blocking flag, exact action grants, and generated marker body.
 - [x] 3.2 Use a fake Claude executable and action gateway to prove events resume one provider session per source Codex task, different tasks stay isolated, and the monitor obtains task history before reviewing later events.
-- [x] 3.3 Add action-flow tests proving an unspecified-decision verdict steers with a reason and one question before interrupting, while a no-decision verdict performs neither action.
+- [x] 3.3 Add action-flow tests proving an unspecified-decision verdict interrupts and then durably delivers its reason and one question in a fresh turn, while a no-decision verdict performs neither action.
 - [x] 3.4 Exercise Warden's codex-control seams to prove successful post-tool and final agent-response native barriers wait for the hook, and failed-tool observer events remain accurately reported as non-retroactive.
 - [x] 3.5 Cover missing-baseline history gaps and provider/action failures without reporting a false successful review or interruption.
+- [x] 3.6 Reproduce Codex tearing down the native bridge after `turn_interrupt` and prove the bounded hook continues through `turn_start` and persistent-session commit.
 
 ## 4. Documentation and Verification
 
 - [x] 4.1 Update the README onboarding and hook-authoring guidance to explain bundled templates, copy-if-absent ownership, marker activation, per-turn scope, persistent per-task context, Sonnet usage, and blocking limitations.
 - [x] 4.2 Run formatting, lints, the complete Rust workspace test suite, and the complete Python test suite.
 - [x] 4.3 Build and install the release CLI, start it against an isolated Warden home, and verify the template and generated marker appear during that startup without changing an existing copy.
-- [x] 4.4 Run an opt-in live smoke test with the local Claude subscription and a disposable Codex task to verify context reuse, steer-before-interrupt behavior, and actual blocking at supported native barriers.
+- [x] 4.4 Run an opt-in live smoke test with the local Claude subscription and a disposable Codex task to verify context reuse, interrupt-before-follow-up behavior, visible question delivery, and actual blocking at supported native barriers.
 - [x] 4.5 Verify the implementation against this OpenSpec change, then commit and push the completed change to `RPD123-byte/Warden` main.

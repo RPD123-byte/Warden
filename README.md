@@ -90,11 +90,12 @@ On its first selected event it reads that task's retained history, treats the in
 available specifications as the baseline, and checks later actions for consequential product,
 architecture, interface, dependency, code-layout, or file-layout choices the baseline did not make.
 
-When Claude finds such a decision, it first steers the active Codex turn with the reason and exactly
-one question for the user, then interrupts the turn. Its only grants are current-task history,
-current-turn steer, and current-turn interrupt. If the retained history has a gap that prevents a
-trustworthy baseline, it stops and asks which request or specification governs the work instead of
-guessing.
+When Claude finds such a decision, it interrupts the implementation turn, waits for it to become
+terminal, and starts a fresh turn in the same task carrying the reason and exactly one question for
+the user. The fresh turn makes the question durable; steering the old turn before interrupting it
+would discard the queued input. Its only grants are current-task history, current-turn interrupt,
+and current-task turn start. If retained history has a gap that prevents a trustworthy baseline, it
+uses the same stop-and-follow-up flow to ask which request or specification governs the work.
 
 Select this marker on every user message you want monitored:
 

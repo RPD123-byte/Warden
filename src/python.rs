@@ -665,14 +665,35 @@ impl WorkerProcess {
             .flush()
             .await
             .map_err(|source| io_error(PathBuf::from("worker stdin"), source))?;
-        let line = read_bounded_line(&mut self.stdout, max_message_bytes).await?;
-        let result: WorkerResult = serde_json::from_slice(&line)
-            .map_err(|error| PythonError::Protocol(format!("invalid worker result: {error}")))?;
-        if result.message_type != "result" || result.id.as_deref() != Some(&id) {
-            return Err(PythonError::Protocol(
-                "worker result type or id does not match invocation".into(),
-            ));
-        }
+        let mut stale_results = 0_u8;
+        let result = loop {
+            let line = read_bounded_line(&mut self.stdout, max_message_bytes).await?;
+            let result: WorkerResult = serde_json::from_slice(&line).map_err(|error| {
+                PythonError::Protocol(format!("invalid worker result: {error}"))
+            })?;
+            if result.message_type != "result" {
+                return Err(PythonError::Protocol(format!(
+                    "worker returned unexpected message type {:?} for invocation {id}",
+                    result.message_type
+                )));
+            }
+            if result.id.as_deref() == Some(&id) {
+                break result;
+            }
+            stale_results = stale_results.saturating_add(1);
+            tracing::warn!(
+                hook = %self.hook_id,
+                revision = %self.revision,
+                expected_invocation = %id,
+                stale_invocation = ?result.id,
+                "discarding stale Python worker result from a cancelled invocation"
+            );
+            if stale_results >= 32 {
+                return Err(PythonError::Protocol(format!(
+                    "worker returned too many stale results while waiting for invocation {id}"
+                )));
+            }
+        };
         if !result.ok {
             return Err(PythonError::Invocation {
                 hook: self.hook_id.clone(),
