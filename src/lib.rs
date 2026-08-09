@@ -3,6 +3,7 @@
 pub mod action;
 pub mod activation;
 pub mod config;
+pub mod continuous;
 pub mod event;
 pub mod native_hook;
 pub mod onboarding;
@@ -13,6 +14,7 @@ pub mod runtime;
 pub use action::{ActionGrant, ActionKind, GatewayRequest, GatewayResponse};
 pub use activation::{ActivationRecord, ActivationRouter, HookDelivery};
 pub use config::{Config, DataPaths};
+pub use continuous::{ContinuousSession, ContinuousSessionStore, ContinuousStatus};
 pub use event::{HookEvent, HookEventKind, normalize_event};
 pub use native_hook::{
     NativeHookInstall, ensure_native_bridge_bundle, remove_native_bridge_entries,

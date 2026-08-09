@@ -1,6 +1,9 @@
 use crate::{
+    continuous::{
+        ContinuousDiagnostic, ContinuousError, ContinuousSession, ContinuousSessionStore,
+    },
     event::{HookEvent, HookEventKind, turn_input},
-    registry::{HookId, HookRegistry, HookRevision},
+    registry::{HookId, HookRegistry, HookRevision, MarkerIntent},
 };
 use codex_control::SequencedEvent;
 use serde::{Deserialize, Serialize};
@@ -25,8 +28,13 @@ pub struct ActivationRecord {
     pub revision: Arc<HookRevision>,
     pub thread_id: String,
     pub turn_id: String,
-    user_prompt_delivered: bool,
-    delivered: HashSet<DeliveryIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DeliveryKey {
+    hook: HookId,
+    thread_id: String,
+    turn_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -55,17 +63,34 @@ pub struct ActivationRouter {
     generated_skills_root: PathBuf,
     registry: HookRegistry,
     active: Arc<RwLock<HashMap<ActivationKey, ActivationRecord>>>,
+    delivered: Arc<RwLock<HashMap<DeliveryKey, HashSet<DeliveryIdentity>>>>,
+    continuous: ContinuousSessionStore,
     gaps: Arc<RwLock<Vec<CoverageGap>>>,
 }
 
 impl ActivationRouter {
     pub fn new(generated_skills_root: PathBuf, registry: HookRegistry) -> Self {
-        Self {
+        let continuous_root = generated_skills_root
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("continuous-sessions");
+        Self::with_continuous_root(generated_skills_root, registry, continuous_root)
+            .expect("continuous-session state initializes")
+    }
+
+    pub fn with_continuous_root(
+        generated_skills_root: PathBuf,
+        registry: HookRegistry,
+        continuous_root: PathBuf,
+    ) -> Result<Self, ContinuousError> {
+        Ok(Self {
             generated_skills_root,
             registry,
             active: Arc::new(RwLock::new(HashMap::new())),
+            delivered: Arc::new(RwLock::new(HashMap::new())),
+            continuous: ContinuousSessionStore::load(continuous_root)?,
             gaps: Arc::new(RwLock::new(Vec::new())),
-        }
+        })
     }
 
     /// Resolves activation from Codex's selected-skill marker before events from the starting
@@ -131,11 +156,70 @@ impl ActivationRouter {
     }
 
     async fn begin_for_input(&self, thread_id: &str, turn_id: &str, input: &Value) -> Vec<HookId> {
-        let mut activated = Vec::new();
+        self.delivered
+            .write()
+            .await
+            .retain(|key, _| key.thread_id != thread_id || key.turn_id == turn_id);
+        let mut primary = Vec::new();
+        let mut controls = HashMap::<HookId, HashSet<_>>::new();
         for skill_path in structured_skill_paths(input) {
-            let Ok(id) = resolve_marker(&self.generated_skills_root, &skill_path) else {
+            let Ok(name) = resolve_marker_name(&self.generated_skills_root, &skill_path) else {
                 continue;
             };
+            let Some(intent) = self.registry.marker_intent(&name).await else {
+                continue;
+            };
+            match intent {
+                MarkerIntent::Primary(id) => primary.push(id),
+                MarkerIntent::Control { hook, operation } => {
+                    controls.entry(hook).or_default().insert(operation);
+                }
+            }
+        }
+
+        let mut activated = Vec::new();
+        for (hook, operations) in controls {
+            if operations.len() != 1 {
+                self.continuous
+                    .note(
+                        hook,
+                        thread_id,
+                        "conflicting continuous controls were selected in one prompt".into(),
+                    )
+                    .await;
+                continue;
+            }
+            let operation = *operations.iter().next().expect("one operation");
+            let Some(revision) = self.registry.current(&hook).await else {
+                self.continuous
+                    .note(
+                        hook,
+                        thread_id,
+                        "hook has no valid published revision".into(),
+                    )
+                    .await;
+                continue;
+            };
+            match self
+                .continuous
+                .transition(
+                    hook.clone(),
+                    thread_id,
+                    operation,
+                    revision.metadata.persistent_agent_sessions,
+                )
+                .await
+            {
+                Ok(_) => activated.push(hook),
+                Err(error) => {
+                    self.continuous
+                        .note(hook, thread_id, error.to_string())
+                        .await;
+                }
+            }
+        }
+
+        for id in primary {
             let Some(revision) = self.registry.current(&id).await else {
                 continue;
             };
@@ -152,8 +236,6 @@ impl ActivationRouter {
                     revision,
                     thread_id: thread_id.to_owned(),
                     turn_id: turn_id.to_owned(),
-                    user_prompt_delivered: false,
-                    delivered: HashSet::new(),
                 });
             activated.push(id);
         }
@@ -170,39 +252,72 @@ impl ActivationRouter {
             return Vec::new();
         };
         let terminal = is_terminal(event.kind);
-        let mut active = self.active.write().await;
-        let matching_keys = active
-            .keys()
-            .filter(|key| key.thread_id == thread_id && key.turn_id == turn_id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let (matching_keys, mut eligible) = {
+            let active = self.active.read().await;
+            let matching_keys = active
+                .keys()
+                .filter(|key| key.thread_id == thread_id && key.turn_id == turn_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let eligible = matching_keys
+                .iter()
+                .filter_map(|key| {
+                    active
+                        .get(key)
+                        .map(|record| (key.hook.clone(), record.revision.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            (matching_keys, eligible)
+        };
+        for hook in self.continuous.running_for_thread(thread_id).await {
+            if eligible.contains_key(&hook) {
+                continue;
+            }
+            if let Some(revision) = self.registry.current(&hook).await {
+                eligible.insert(hook, revision);
+            } else {
+                self.continuous
+                    .note(
+                        hook,
+                        thread_id,
+                        "hook has no valid published revision".into(),
+                    )
+                    .await;
+            }
+        }
+
         let mut deliveries = Vec::new();
-        for key in &matching_keys {
-            let record = active.get_mut(key).expect("key was collected from map");
-            if !record.revision.metadata.events.contains(&event.kind) {
+        let identity = DeliveryIdentity {
+            kind: event.kind,
+            item_id: (event.kind != HookEventKind::UserPromptSubmitted)
+                .then(|| event.item_id.clone())
+                .flatten(),
+            observer_disambiguator: delivery_disambiguator(&event),
+        };
+        let mut delivered = self.delivered.write().await;
+        for (hook, revision) in eligible {
+            if !revision.metadata.events.contains(&event.kind) {
                 continue;
             }
-            if event.kind == HookEventKind::UserPromptSubmitted && record.user_prompt_delivered {
-                continue;
-            }
-            let identity = DeliveryIdentity {
-                kind: event.kind,
-                item_id: event.item_id.clone(),
-                observer_disambiguator: delivery_disambiguator(&event),
+            let delivery_key = DeliveryKey {
+                hook,
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
             };
-            if record.delivered.contains(&identity) {
+            if !delivered
+                .entry(delivery_key)
+                .or_default()
+                .insert(identity.clone())
+            {
                 continue;
-            }
-            record.delivered.insert(identity);
-            if event.kind == HookEventKind::UserPromptSubmitted {
-                record.user_prompt_delivered = true;
             }
             deliveries.push(HookDelivery {
-                revision: record.revision.clone(),
+                revision,
                 event: event.clone(),
             });
         }
         if terminal {
+            let mut active = self.active.write().await;
             for key in matching_keys {
                 active.remove(&key);
             }
@@ -226,6 +341,8 @@ impl ActivationRouter {
         // A marker may be in the missing interval. Expiring is conservative: Warden never
         // invents an activation and never keeps one alive across an unknowable terminal event.
         active.clear();
+        drop(active);
+        self.delivered.write().await.clear();
         self.gaps.write().await.push(gap.clone());
         gap
     }
@@ -236,6 +353,29 @@ impl ActivationRouter {
 
     pub async fn gaps(&self) -> Vec<CoverageGap> {
         self.gaps.read().await.clone()
+    }
+
+    pub async fn continuous_sessions(&self) -> Vec<ContinuousSession> {
+        self.continuous.sessions().await
+    }
+
+    pub async fn continuous_diagnostics(&self) -> Vec<ContinuousDiagnostic> {
+        self.continuous.diagnostics().await
+    }
+
+    pub async fn reconcile_continuous(&self) -> Result<usize, ContinuousError> {
+        self.continuous.reconcile(&self.registry).await
+    }
+
+    pub async fn remove_continuous_hook(&self, hook: &HookId) -> Result<usize, ContinuousError> {
+        self.continuous.remove_hook(hook).await
+    }
+
+    pub async fn remove_continuous_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<usize, ContinuousError> {
+        self.continuous.remove_thread(thread_id).await
     }
 }
 
@@ -342,7 +482,7 @@ fn serialized_skill_path(text: &str) -> Option<PathBuf> {
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-fn resolve_marker(root: &Path, selected_path: &Path) -> Result<HookId, String> {
+fn resolve_marker_name(root: &Path, selected_path: &Path) -> Result<String, String> {
     let canonical_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
     let canonical_path = fs::canonicalize(selected_path).map_err(|error| error.to_string())?;
     if !canonical_path.starts_with(&canonical_root)
@@ -361,7 +501,9 @@ fn resolve_marker(root: &Path, selected_path: &Path) -> Result<HookId, String> {
     if components.next().is_none() || components.next().is_some() {
         return Err("marker path must be <root>/<hook>/SKILL.md".into());
     }
-    HookId::parse(id.to_owned()).map_err(|error| error.to_string())
+    HookId::parse(id.to_owned())
+        .map(|id| id.to_string())
+        .map_err(|error| error.to_string())
 }
 
 fn is_terminal(kind: HookEventKind) -> bool {
@@ -384,7 +526,10 @@ mod tests {
 
     #[async_trait]
     impl HookPreparer for Preparer {
-        async fn prepare(&self, _: &HookId, _: &Path) -> Result<HookMetadata, String> {
+        async fn prepare(&self, _: &HookId, source: &Path) -> Result<HookMetadata, String> {
+            let stateful = fs::read_to_string(source.join("hook.py"))
+                .map(|source| source.contains("STATEFUL"))
+                .unwrap_or(false);
             Ok(HookMetadata {
                 function: "run".into(),
                 events: HashSet::from([
@@ -395,6 +540,7 @@ mod tests {
                 ]),
                 actions: HashSet::new(),
                 blocking: false,
+                persistent_agent_sessions: stateful,
             })
         }
     }
@@ -702,5 +848,351 @@ mod tests {
         let gap = router.note_gap(2, Some(10), 20).await;
         assert_eq!(gap.expired_activations, 1);
         assert_eq!(router.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn stateless_start_routes_later_markerless_turns_until_stop() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "def run(event): pass").unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry);
+
+        let start = source(
+            1,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"one","input":[{
+                "type":"skill","name":"demo-start","path":temp.path().join("skills/demo-start/SKILL.md")
+            }]}}),
+        );
+        assert_eq!(
+            router.begin_from_turn_start(&start).await,
+            [HookId::parse("demo").unwrap()]
+        );
+        assert_eq!(
+            router
+                .route(crate::event::normalize_event(start)[0].clone())
+                .await
+                .len(),
+            1
+        );
+
+        let later = source(
+            2,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"two","input":[{"type":"text","text":"continue"}]}}),
+        );
+        assert!(router.begin_from_turn_start(&later).await.is_empty());
+        assert_eq!(
+            router
+                .route(crate::event::normalize_event(later)[0].clone())
+                .await
+                .len(),
+            1
+        );
+
+        let stop = source(
+            3,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"three","input":[{
+                "type":"skill","name":"demo-stop","path":temp.path().join("skills/demo-stop/SKILL.md")
+            }]}}),
+        );
+        assert_eq!(
+            router.begin_from_turn_start(&stop).await,
+            [HookId::parse("demo").unwrap()]
+        );
+        assert!(
+            router
+                .route(crate::event::normalize_event(stop)[0].clone())
+                .await
+                .is_empty()
+        );
+        assert!(router.continuous_sessions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stateful_pause_primary_and_resume_are_independent() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "# STATEFUL\ndef run(event): pass").unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry);
+
+        for (sequence, turn, marker, expected) in [
+            (1, "start", "demo-start", 1),
+            (2, "pause", "demo-pause", 0),
+            (3, "primary", "demo", 1),
+            (4, "resume", "demo-resume", 1),
+        ] {
+            let start = source(
+                sequence,
+                "turn/started",
+                json!({"threadId":"t","turn":{"id":turn,"input":[{
+                    "type":"skill","name":marker,"path":temp.path().join("skills").join(marker).join("SKILL.md")
+                }]}}),
+            );
+            router.begin_from_turn_start(&start).await;
+            assert_eq!(
+                router
+                    .route(crate::event::normalize_event(start)[0].clone())
+                    .await
+                    .len(),
+                expected,
+                "unexpected delivery for {marker}"
+            );
+        }
+        assert_eq!(
+            router.continuous_sessions().await[0].status,
+            crate::continuous::ContinuousStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn continuous_session_uses_latest_revision_and_paused_state_is_removed_if_stateless() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(
+            hooks.join("hook.py"),
+            "# STATEFUL\ndef run(event): return 1",
+        )
+        .unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry.clone());
+
+        let start = source(
+            1,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"one","input":[{
+                "type":"skill","name":"demo-start","path":temp.path().join("skills/demo-start/SKILL.md")
+            }]}}),
+        );
+        router.begin_from_turn_start(&start).await;
+        let original = router
+            .route(crate::event::normalize_event(start)[0].clone())
+            .await;
+        assert_eq!(original.len(), 1);
+
+        fs::write(
+            hooks.join("hook.py"),
+            "# STATEFUL\ndef run(event): return 2",
+        )
+        .unwrap();
+        registry.refresh().await.unwrap();
+        let later = source(
+            2,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"two","input":[]}}),
+        );
+        let replacement = router
+            .route(crate::event::normalize_event(later)[0].clone())
+            .await;
+        assert_eq!(replacement.len(), 1);
+        assert_ne!(
+            original[0].revision.revision,
+            replacement[0].revision.revision
+        );
+
+        let pause = source(
+            3,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"three","input":[{
+                "type":"skill","name":"demo-pause","path":temp.path().join("skills/demo-pause/SKILL.md")
+            }]}}),
+        );
+        router.begin_from_turn_start(&pause).await;
+        assert_eq!(
+            router.continuous_sessions().await[0].status,
+            crate::continuous::ContinuousStatus::Paused
+        );
+
+        fs::write(hooks.join("hook.py"), "def run(event): return 3").unwrap();
+        registry.refresh().await.unwrap();
+        assert_eq!(router.reconcile_continuous().await.unwrap(), 1);
+        assert!(router.continuous_sessions().await.is_empty());
+        assert!(!temp.path().join("skills/demo-pause").exists());
+    }
+
+    #[tokio::test]
+    async fn coverage_gap_expires_one_turn_state_but_preserves_continuous_choice() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "def run(event): pass").unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry);
+        let start = source(
+            1,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"one","input":[{
+                "type":"skill","name":"demo-start","path":temp.path().join("skills/demo-start/SKILL.md")
+            }]}}),
+        );
+        router.begin_from_turn_start(&start).await;
+        router.note_gap(1, Some(10), 20).await;
+
+        let later = source(
+            21,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"two","input":[]}}),
+        );
+        assert_eq!(
+            router
+                .route(crate::event::normalize_event(later)[0].clone())
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_stateful_controls_apply_no_transition() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "# STATEFUL\ndef run(event): pass").unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry);
+        let start = source(
+            1,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"one","input":[{
+                "type":"skill","name":"demo-start","path":temp.path().join("skills/demo-start/SKILL.md")
+            }]}}),
+        );
+        router.begin_from_turn_start(&start).await;
+
+        let conflict = source(
+            2,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"two","input":[
+                {"type":"skill","name":"demo-pause","path":temp.path().join("skills/demo-pause/SKILL.md")},
+                {"type":"skill","name":"demo-resume","path":temp.path().join("skills/demo-resume/SKILL.md")}
+            ]}}),
+        );
+        assert!(router.begin_from_turn_start(&conflict).await.is_empty());
+        assert_eq!(
+            router.continuous_sessions().await[0].status,
+            crate::continuous::ContinuousStatus::Running
+        );
+        assert_eq!(router.continuous_diagnostics().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_restores_paused_and_running_sessions_without_cross_task_routing() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "# STATEFUL\ndef run(event): pass").unwrap();
+        let make_registry = || {
+            HookRegistry::new(
+                temp.path().join("hooks"),
+                temp.path().join("modules"),
+                temp.path().join("skills"),
+                temp.path().join("runtimes"),
+                Arc::new(Preparer),
+            )
+        };
+        let registry = make_registry();
+        registry.refresh().await.unwrap();
+        let state_root = temp.path().join("continuous-state");
+        let router = ActivationRouter::with_continuous_root(
+            temp.path().join("skills"),
+            registry,
+            state_root.clone(),
+        )
+        .unwrap();
+        for (sequence, thread) in [(1, "task-a"), (2, "task-b")] {
+            let start = source(
+                sequence,
+                "turn/started",
+                json!({"threadId":thread,"turn":{"id":"start","input":[{
+                    "type":"skill","name":"demo-start","path":temp.path().join("skills/demo-start/SKILL.md")
+                }]}}),
+            );
+            router.begin_from_turn_start(&start).await;
+        }
+        let pause = source(
+            3,
+            "turn/started",
+            json!({"threadId":"task-a","turn":{"id":"pause","input":[{
+                "type":"skill","name":"demo-pause","path":temp.path().join("skills/demo-pause/SKILL.md")
+            }]}}),
+        );
+        router.begin_from_turn_start(&pause).await;
+        drop(router);
+
+        let restarted_registry = make_registry();
+        restarted_registry.refresh().await.unwrap();
+        let restarted = ActivationRouter::with_continuous_root(
+            temp.path().join("skills"),
+            restarted_registry,
+            state_root,
+        )
+        .unwrap();
+        restarted.reconcile_continuous().await.unwrap();
+        let sessions = restarted.continuous_sessions().await;
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|session| {
+            session.key.thread_id == "task-a"
+                && session.status == crate::continuous::ContinuousStatus::Paused
+        }));
+        assert!(sessions.iter().any(|session| {
+            session.key.thread_id == "task-b"
+                && session.status == crate::continuous::ContinuousStatus::Running
+        }));
+
+        for (sequence, thread, expected) in [(4, "task-a", 0), (5, "task-b", 1)] {
+            let event = source(
+                sequence,
+                "turn/started",
+                json!({"threadId":thread,"turn":{"id":"later","input":[]}}),
+            );
+            assert_eq!(
+                restarted
+                    .route(crate::event::normalize_event(event)[0].clone())
+                    .await
+                    .len(),
+                expected
+            );
+        }
     }
 }

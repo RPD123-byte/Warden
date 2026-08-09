@@ -36,6 +36,7 @@ async fn installed_template_validates_and_generates_its_exact_marker() {
     let revision = registry.current(&id).await.unwrap();
 
     assert!(revision.metadata.blocking);
+    assert!(revision.metadata.persistent_agent_sessions);
     assert_eq!(
         revision.metadata.events,
         HashSet::from([
@@ -60,6 +61,16 @@ async fn installed_template_validates_and_generates_its_exact_marker() {
     )
     .unwrap();
     assert!(marker.trim().ends_with(MARKER_BODY));
+    for control in ["start", "pause", "resume", "stop"] {
+        let marker = std::fs::read_to_string(
+            config
+                .paths
+                .generated_skills
+                .join(format!("unspecified-decisions-{control}/SKILL.md")),
+        )
+        .unwrap();
+        assert!(marker.trim().ends_with(MARKER_BODY));
+    }
 
     let source =
         std::fs::read_to_string(config.paths.hooks.join("unspecified-decisions/hook.py")).unwrap();

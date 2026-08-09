@@ -1,5 +1,6 @@
 use crate::{
     activation::{ActivationRouter, HookDelivery},
+    continuous::ContinuousStatus,
     event::{HookEvent, HookEventEnvelope, HookEventKind, NativeHookContext},
     python::PythonRuntime,
     registry::HookId,
@@ -451,6 +452,28 @@ impl ActionGateway {
         }
         if request.method == "warden.health" {
             let health = self.handle.health().borrow().clone();
+            let mut daemon = self.daemon_health.read().await.clone();
+            if let Some(native) = &self.native {
+                let sessions = native.router.continuous_sessions().await;
+                let diagnostics = native.router.continuous_diagnostics().await;
+                let running = sessions
+                    .iter()
+                    .filter(|session| session.status == ContinuousStatus::Running)
+                    .count();
+                let paused = sessions.len().saturating_sub(running);
+                daemon
+                    .as_object_mut()
+                    .expect("daemon health is always an object")
+                    .insert(
+                        "continuous_sessions".into(),
+                        json!({
+                            "running": running,
+                            "paused": paused,
+                            "items": sessions.into_iter().take(64).collect::<Vec<_>>(),
+                            "diagnostics": diagnostics.into_iter().rev().take(64).collect::<Vec<_>>(),
+                        }),
+                    );
+            }
             return Ok(json!({
                 "phase": format!("{:?}", health.phase).to_lowercase(),
                 "reconnect_attempts": health.reconnect_attempts,
@@ -458,7 +481,7 @@ impl ActionGateway {
                 "detail": health.detail,
                 "active_invocations": self.invocations.read().await.len(),
                 "dispatcher": self.dispatcher_diagnostics(),
-                "daemon": self.daemon_health.read().await.clone(),
+                "daemon": daemon,
             }));
         }
         if request.method == "warden.native_hook.event" {

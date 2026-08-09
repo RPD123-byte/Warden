@@ -9,6 +9,21 @@ from ..client import get_current_client
 from ..events import HookEvent
 
 
+_declared_persistent_sessions: set[tuple[str, str]] = set()
+
+
+def _reset_persistent_session_declarations() -> None:
+    """Reset declarations before importing one isolated hook module."""
+
+    _declared_persistent_sessions.clear()
+
+
+def _persistent_session_declarations() -> frozenset[tuple[str, str]]:
+    """Return named sessions constructed while the current hook was imported."""
+
+    return frozenset(_declared_persistent_sessions)
+
+
 class _Requester(Protocol):
     async def request(
         self, method: str, params: Mapping[str, Any] | None = None
@@ -87,9 +102,11 @@ def session(
 ) -> AgentSession:
     if not isinstance(name, str) or not name.strip():
         raise ValueError("persistent agent session name must be a non-empty string")
+    normalized_name = name.strip()
+    _declared_persistent_sessions.add((provider, normalized_name))
     return AgentSession(
         provider=provider,
-        name=name.strip(),
+        name=normalized_name,
         prompt=_prompt(prompt),
         model=_model(model),
         warden=warden,

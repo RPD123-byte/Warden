@@ -6,10 +6,10 @@ use warden_daemon::{Config, DataPaths, Warden, remove_native_bridge_entries};
 #[command(
     name = "warden-daemon",
     version,
-    about = "Turn-scoped local hooks for Codex tasks"
+    about = "Turn-scoped and continuously controlled local hooks for Codex tasks"
 )]
 struct Arguments {
-    /// Root for authored hooks, generated marker skills, runtimes, and sessions.
+    /// Root for authored hooks, generated control markers, runtimes, and session state.
     #[arg(long, env = "WARDEN_HOME")]
     home: Option<PathBuf>,
 

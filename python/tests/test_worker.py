@@ -94,6 +94,7 @@ def test_worker_handshakes_then_invokes_async_hook_with_bound_event_and_client(
         "events": ["post_tool_use"],
         "actions": ["current_event", "turn_interrupt"],
         "blocking": False,
+        "persistent_agent_sessions": False,
         "is_async": True,
     }
     assert handshake["logs"]["stdout"] == "loaded hook\n"
@@ -133,6 +134,26 @@ def test_worker_invokes_sync_hook_and_isolates_exception(tmp_path):
     assert result["error"]["message"] == "hook exploded"
     assert "RuntimeError: hook exploded" in result["error"]["traceback"]
     assert result["logs"]["stdout"] == "before failure\n"
+
+
+def test_worker_classifies_module_scope_named_agent_session_as_stateful(tmp_path):
+    process, output = run_worker(
+        tmp_path,
+        """
+        from warden import hook, HookEventKind
+        from warden.modules import claude
+
+        monitor = claude.session("reviewer", model="sonnet")
+
+        @hook(on=HookEventKind.POST_TOOL_USE)
+        async def handle(event):
+            return await monitor.send(event)
+        """,
+        [],
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert output[0]["hook"]["persistent_agent_sessions"] is True
 
 
 def test_worker_invokes_minimal_event_only_hook(tmp_path):

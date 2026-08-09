@@ -1,53 +1,44 @@
 ---
 name: create-warden-hook
-description: Create or update code-first Python hooks for the local Warden daemon, including normalized Codex event selection, optional Python dependencies, optional Claude or Codex agent sessions, and explicit Warden action grants. Use when a user asks to add, change, inspect, or remove a Warden automation or wants a selectable Warden marker in the Codex prompt UI.
+description: Walk the user through designing, creating, updating, or removing a Warden hook for Codex. Use when the user invokes $create-warden-hook, asks to be guided through Warden hook creation, or requests a Warden automation with Python logic, Claude or Codex inference, event filters, blocking behavior, dependencies, or Codex control actions.
 ---
 
 # Create Warden Hook
 
-Create authored hook logic under `WARDEN_HOME/warden-hooks/<hook-name>/`. Treat `~/.warden` as the default `WARDEN_HOME` when the environment variable is unset.
+Guide the user from an idea to a working hook. Treat `~/.warden` as `WARDEN_HOME` when the environment variable is unset.
 
-Do not create or edit Codex native hooks. Warden startup owns the fixed native bridge bundle. Do not create the marker skill yourself. Warden generates the mandatory marker under `WARDEN_HOME/generated-skills/`, attaches that root to its managed app-server, and refreshes skill discovery.
+Do not create Codex native hooks or generated marker skills. Warden owns both. Author only under `WARDEN_HOME/warden-hooks/<hook-name>/`; Warden validates the hook, publishes it, and generates its selectable marker.
 
-## Gather the design
+## Run the walkthrough
 
-Determine:
+Ask only about choices the user has not already made. Ask one short group of questions at a time, using structured choice or multiselect UI when available. Explain choices in plain language. Do not make the user know Warden terminology.
 
-1. The behavior and a short lowercase hook name using letters, numbers, `-`, or `_`.
-2. The normalized events that should invoke it.
-3. Whether it needs a third-party Python package.
-4. Whether it invokes Claude or Codex, and whether each inference is fresh or persistent.
-5. Whether execution is blocking or non-blocking. Default to non-blocking when the user has no preference.
+1. Establish what the hook should notice and what it should do. Derive a short lowercase name containing only letters, numbers, `-`, or `_`, and let the user correct it.
+2. Ask which events should run it:
+   - submitted user prompt (`USER_PROMPT_SUBMITTED`)
+   - turn started (`TURN_STARTED`)
+   - before a tool runs (`PRE_TOOL_USE`)
+   - after a successful tool result (`POST_TOOL_USE`)
+   - after a failed tool result (`POST_TOOL_USE_FAILURE`)
+   - completed assistant response (`AGENT_MESSAGE_COMPLETED`)
+   - completed, failed, or interrupted turn (`TURN_COMPLETED`, `TURN_FAILED`, `TURN_INTERRUPTED`)
+3. Ask how it should run:
+   - ordinary Python only;
+   - fresh Claude or Codex inference on every matching event; or
+   - one persistent Claude or Codex conversation per source Codex task.
+4. Ask whether Codex must wait for it. Default to non-blocking when the user has no preference. Explain that blocking truly pauses Codex only at native barriers: submitted prompts, before tools, successful tool results, and the final assistant response. Other events can be ordered but cannot pause work that already finished.
+5. Ask whether it needs third-party Python packages. Do not add packages speculatively.
+6. For an agent-backed hook, ask one multiselect for allowed Warden actions. Default to `None`; never infer cross-task access:
+   - Current task: `CURRENT_EVENT`, `CURRENT_THREAD_SNAPSHOT`, `CURRENT_THREAD_HISTORY`, `TURN_START`, `TURN_STEER`, `TURN_INTERRUPT`.
+   - Other tasks: `THREAD_LIST`, `ARBITRARY_THREAD_SNAPSHOT`, `ARBITRARY_THREAD_HISTORY`, `ARBITRARY_TURN_START`, `ARBITRARY_TURN_STEER`, `ARBITRARY_TURN_INTERRUPT`.
 
-Use only the event kinds needed:
+Explain that current-task actions are bound to the triggering task and turn, while cross-task actions can inspect or control other Codex tasks. Skip this question for Python-only hooks unless the requested behavior directly requires a Warden action; then grant only that action.
 
-- `USER_PROMPT_SUBMITTED`: normalized submitted user input.
-- `TURN_STARTED`: the Codex turn began.
-- `PRE_TOOL_USE`: native barrier before a tool runs when the bridge is loaded; otherwise an observed tool start.
-- `POST_TOOL_USE`: native barrier after a successful tool result when the bridge is loaded.
-- `POST_TOOL_USE_FAILURE`: a tool-like item completed unsuccessfully.
-- `AGENT_MESSAGE_COMPLETED`: native `Stop` barrier for the final reply; earlier assistant messages remain observed.
-- `TURN_COMPLETED`, `TURN_FAILED`, `TURN_INTERRUPTED`: terminal turn outcomes.
-- `UNKNOWN_UPSTREAM_EVENT`: an upstream message Warden does not classify; use only for deliberate diagnostics.
+Once the choices are clear, briefly recap them and implement the hook. Do not require another confirmation unless the recap exposes a consequential ambiguity.
 
-`blocking=True` holds Codex only for native barrier-backed `USER_PROMPT_SUBMITTED`, `PRE_TOOL_USE`, successful `POST_TOOL_USE`, and final `AGENT_MESSAGE_COMPLETED` events. For failure, terminal, or unknown observer-only events it waits for Warden's ordered processing but cannot pause Codex work that already completed. `blocking=False` schedules the hook without holding either path.
+## Author the hook
 
-## Select actions only for agent-backed hooks
-
-Do not show an action multiselect for a Python-only hook.
-
-If the hook invokes Claude or Codex, ask the user one multiselect for Warden actions. Include `None` and group the remaining options by scope:
-
-- Current invocation: `CURRENT_EVENT`, `CURRENT_THREAD_SNAPSHOT`, `CURRENT_THREAD_HISTORY`, `TURN_START`, `TURN_STEER`, `TURN_INTERRUPT`.
-- Cross-thread: `THREAD_LIST`, `ARBITRARY_THREAD_SNAPSHOT`, `ARBITRARY_THREAD_HISTORY`, `ARBITRARY_TURN_START`, `ARBITRARY_TURN_STEER`, `ARBITRARY_TURN_INTERRUPT`.
-
-Explain in the question that current actions are bound to the triggering Codex task and turn. Cross-thread actions can inspect or control other tasks and therefore require deliberate selection. Default to `None`; never infer a cross-thread grant.
-
-Record selected values in the `actions=[...]` argument of `@hook`. If the user explicitly asks a Python-only hook to perform a Warden action, grant only that requested action without presenting the agent-oriented multiselect.
-
-## Author the minimal hook
-
-Create only `hook.py` unless dependencies are required. Export exactly one decorated function accepting `event`; add the optional `warden` argument only when the function calls the host client directly.
+Create only `hook.py` unless dependencies are required. Export exactly one decorated function accepting `event`; add `warden` only when calling a granted host action.
 
 ```python
 from warden import HookEvent, HookEventKind, hook
@@ -58,30 +49,11 @@ def observe_tool(event: HookEvent) -> None:
     print(f"tool item completed: {event.item_id}")
 ```
 
-Use `event.payload` for normalized data and `event.raw_method` plus `event.raw_payload` when an upstream field has no normalized representation. Warden supplies `event`; do not add event-to-prompt or worker-process configuration.
+Use `event.payload` for normalized data. Use `event.raw_method` and `event.raw_payload` only when the normalized event omits a required upstream field. Warden supplies the in-memory `event`; do not configure event-to-prompt transforms or worker lifetimes.
 
-For selected Warden actions, import `WardenAction` and declare the least privilege needed:
+Declare granted actions on `@hook` with `WardenAction`. Use the least privilege selected by the user.
 
-```python
-from warden import HookEventKind, WardenAction, hook
-
-
-@hook(
-    on=[HookEventKind.AGENT_MESSAGE_COMPLETED],
-    actions=[WardenAction.TURN_INTERRUPT],
-)
-async def inspect_reply(event, warden) -> None:
-    # Call the granted action only when the hook's own logic requires it.
-    await warden.interrupt_turn()
-```
-
-Add `requirements.txt` beside `hook.py` only for third-party packages. Pin versions when practical. Tell the user exactly what Warden will install and that package installation executes trusted local code under their account; it is isolated in a cached environment, not security-sandboxed.
-
-For logic shared by several hooks, place ordinary Python modules under `WARDEN_HOME/modules/` and import them by module name. Warden snapshots that root into each published hook revision and hot-publishes module edits for later activations. Keep the hook-specific entry point in its own `hook.py`; do not copy execution logic into the generated marker skill.
-
-## Add an agent only when requested
-
-Use a fresh conversation by default:
+For fresh agent inference:
 
 ```python
 from warden import HookEventKind, hook
@@ -90,22 +62,19 @@ from warden.modules import claude
 
 @hook(on=[HookEventKind.AGENT_MESSAGE_COMPLETED])
 async def review_reply(event) -> None:
-    await claude.run(event, prompt="Identify unstated implementation decisions.")
+    await claude.run(event, prompt="Identify unsupported claims.")
 ```
 
-Use `codex.run` for fresh Codex inference. The full event is automatically the provider's user message; `prompt` is the monitoring instruction.
+Use `codex.run` for fresh Codex inference. The full event is automatically sent as the provider's user message.
 
-Use an explicit named session only when later active invocations need earlier conversation context:
+For persistent context, declare the named session at module scope:
 
 ```python
 from warden import HookEventKind, hook
 from warden.modules import claude
 
 
-monitor = claude.session(
-    "decision-monitor",
-    prompt="Track implementation decisions across selected events.",
-)
+monitor = claude.session("decision-monitor", prompt="Track implementation decisions.")
 
 
 @hook(on=[HookEventKind.USER_PROMPT_SUBMITTED, HookEventKind.AGENT_MESSAGE_COMPLETED])
@@ -113,14 +82,21 @@ async def monitor_decisions(event) -> None:
     await monitor.send(event)
 ```
 
-Use `codex.session` for persistent Codex context. A persistent session receives nothing from turns where the marker was not selected.
+Use `codex.session` for persistent Codex context. A persistent conversation is isolated per source Codex task and receives nothing from turns where the hook is inactive.
+
+Place `requirements.txt` beside `hook.py` only for third-party packages. Pin versions when practical. Tell the user that Warden installs them into a cached environment, but hook code and packages still run as the local user and are not security-sandboxed.
+
+Put shared Python modules under `WARDEN_HOME/modules/`. Keep hook-specific execution in its own `hook.py`.
 
 ## Verify and hand off
 
-1. Check Python syntax, require a JSON-serializable return value when the hook returns anything, and inspect the final files without exposing secrets.
-2. Let Warden's file watcher validate and publish the candidate; do not invent a manual reload command.
-3. Run `warden health` and inspect daemon logs if publication fails.
-4. Confirm `WARDEN_HOME/generated-skills/<hook-name>/SKILL.md` appears. Its instruction body must be exactly `This skill is an activation marker for the local Warden service. Ignore`.
-5. Tell the user to select that generated skill on every Codex message that should activate the hook. Selection applies only to that turn.
+1. Check Python syntax and require JSON-serializable return values.
+2. Let Warden's watcher validate and publish the change; there is no reload command.
+3. Run `warden health` and inspect daemon output if publication fails.
+4. Confirm `WARDEN_HOME/generated-skills/<hook-name>/SKILL.md` appears. Never repair it manually.
+5. Explain how to activate the generated marker:
+   - selecting `<hook-name>` activates it for one message and that turn;
+   - every hook also gets `<hook-name>-start` and `<hook-name>-stop`;
+   - hooks with a module-scope persistent agent session also get `<hook-name>-pause` and `<hook-name>-resume`.
 
-When updating a hook, preserve unrelated user logic. An invalid candidate must leave the last valid revision active. To remove a hook recoverably, move its authored directory outside `warden-hooks/`; Warden removes the generated marker and stops new activations.
+When updating a hook, preserve unrelated user logic. An invalid candidate leaves the last valid revision active. For recoverable removal, move the authored hook directory outside `warden-hooks/`; Warden removes its generated markers and stops new activations.

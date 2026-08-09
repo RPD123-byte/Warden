@@ -1,4 +1,4 @@
 interface:
   display_name: "Create Warden Hook"
-  short_description: "Create or update a code-first Warden hook"
-  default_prompt: "Use $create-warden-hook to create a Warden hook that monitors completed tool calls."
+  short_description: "Guided setup for a Warden hook"
+  default_prompt: "Use $create-warden-hook to walk me through creating a Warden hook."

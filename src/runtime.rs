@@ -42,6 +42,8 @@ pub enum RuntimeError {
     #[error(transparent)]
     Registry(#[from] crate::registry::RegistryError),
     #[error(transparent)]
+    Continuous(#[from] crate::continuous::ContinuousError),
+    #[error(transparent)]
     Skill(#[from] codex_control::SkillManagementError),
     #[error(transparent)]
     ThreadList(#[from] codex_control::ThreadListError),
@@ -148,7 +150,12 @@ impl Warden {
             agent_sessions.clone(),
             config.paths.sessions.clone(),
         ));
-        let router = ActivationRouter::new(config.paths.generated_skills.clone(), registry.clone());
+        let router = ActivationRouter::with_continuous_root(
+            config.paths.generated_skills.clone(),
+            registry.clone(),
+            config.paths.continuous_sessions.clone(),
+        )?;
+        router.reconcile_continuous().await?;
         let bridge_token = fs::read_to_string(&native_hook.credential_file)
             .map_err(|source| RuntimeError::Io {
                 path: native_hook.credential_file.clone(),
@@ -219,6 +226,7 @@ impl Warden {
         let mut transport_health = handle.health();
         let refresh_handle = handle.clone();
         let refresh_registry = registry.clone();
+        let refresh_router = router.clone();
         let refresh_gateway = gateway.clone();
         let refresh_skill_targets = skill_targets.clone();
         let refresh_metrics = metrics.clone();
@@ -254,6 +262,9 @@ impl Warden {
                         match refresh_registry.refresh().await {
                             Ok(delta) => {
                                 log_registry_delta(&delta);
+                                if let Err(error) = refresh_router.reconcile_continuous().await {
+                                    tracing::error!(%error, "continuous-session reconciliation after hook change failed");
+                                }
                                 if let Err(error) = refresh_skill_targets.refresh_from_handle(&refresh_handle).await {
                                     tracing::error!(%error, "could not refresh task CWDs after hook change");
                                 }
@@ -454,6 +465,21 @@ async fn process_source_with_input(
     source: Arc<codex_control::SequencedEvent>,
     retained_input: Option<Value>,
 ) {
+    if let Some(thread_id) = retired_thread_id(&source) {
+        match router.remove_continuous_thread(thread_id).await {
+            Ok(removed) if removed > 0 => {
+                tracing::info!(
+                    thread_id,
+                    removed,
+                    "removed continuous sessions for retired task"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(thread_id, %error, "could not remove continuous sessions for retired task");
+            }
+        }
+    }
     let activated = router
         .begin_from_source_with_input(&source, retained_input.as_ref())
         .await;
@@ -466,6 +492,12 @@ async fn process_source_with_input(
             .dispatch_deliveries(python.clone(), deliveries)
             .await;
     }
+}
+
+fn retired_thread_id(source: &codex_control::SequencedEvent) -> Option<&str> {
+    matches!(source.method(), Some("thread/archived" | "thread/deleted"))
+        .then(|| source.thread_id.as_deref())
+        .flatten()
 }
 
 async fn recover_active_prompt(
@@ -1193,6 +1225,23 @@ mod tests {
     fn warden_startup_does_not_reconcile_historical_tasks() {
         let config = control_config(false);
         assert_eq!(config.ingest.reconcile_candidate_limit, 0);
+    }
+
+    #[test]
+    fn dependency_lifecycle_archive_and_delete_use_authoritative_task_identity() {
+        for method in ["thread/archived", "thread/deleted"] {
+            let source = SequencedEvent::from_frame(
+                1,
+                Duration::ZERO,
+                IncomingFrame::parse(json!({
+                    "jsonrpc":"2.0",
+                    "method":method,
+                    "params":{"threadId":"task-123"}
+                }))
+                .unwrap(),
+            );
+            assert_eq!(retired_thread_id(&source), Some("task-123"));
+        }
     }
 
     struct SessionDriver {

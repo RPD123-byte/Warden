@@ -14,6 +14,35 @@ use tokio::sync::{Mutex, RwLock};
 pub const MARKER_BODY: &str =
     "This skill is an activation marker for the local Warden service. Ignore";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlOperation {
+    Start,
+    Pause,
+    Resume,
+    Stop,
+}
+
+impl ControlOperation {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkerIntent {
+    Primary(HookId),
+    Control {
+        hook: HookId,
+        operation: ControlOperation,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HookId(String);
@@ -52,6 +81,8 @@ pub struct HookMetadata {
     pub actions: HashSet<String>,
     #[serde(default)]
     pub blocking: bool,
+    #[serde(default)]
+    pub persistent_agent_sessions: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +138,7 @@ pub struct HookRegistry {
     refresh_lock: Arc<Mutex<()>>,
     current: Arc<RwLock<HashMap<HookId, Arc<HookRevision>>>>,
     failures: Arc<RwLock<HashMap<HookId, String>>>,
+    marker_catalog: Arc<RwLock<HashMap<String, MarkerIntent>>>,
 }
 
 impl HookRegistry {
@@ -126,6 +158,7 @@ impl HookRegistry {
             refresh_lock: Arc::new(Mutex::new(())),
             current: Arc::new(RwLock::new(HashMap::new())),
             failures: Arc::new(RwLock::new(HashMap::new())),
+            marker_catalog: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -149,6 +182,10 @@ impl HookRegistry {
         self.failures.read().await.clone()
     }
 
+    pub async fn marker_intent(&self, name: &str) -> Option<MarkerIntent> {
+        self.marker_catalog.read().await.get(name).cloned()
+    }
+
     /// Scans authored hook directories and atomically publishes only fully prepared revisions.
     /// Existing `Arc<HookRevision>` values remain valid for in-flight activations.
     pub async fn refresh(&self) -> Result<RegistryDelta, RegistryError> {
@@ -164,17 +201,39 @@ impl HookRegistry {
 
         let candidates = discover(&self.hooks_root)?;
         let candidate_ids = candidates.keys().cloned().collect::<HashSet<_>>();
-        let mut existing_ids = self
+        let existing_ids = self
             .current
             .read()
             .await
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
-        existing_ids.extend(discover_marker_ids(&self.generated_skills_root)?);
+        let reserved_by_current = {
+            let current = self.current.read().await;
+            control_marker_owners(&current, &candidate_ids)
+        };
         let mut delta = RegistryDelta::default();
 
         for (id, authored_dir) in candidates {
+            if let Some(owner) = reserved_by_current.get(id.as_str())
+                && owner != &id
+            {
+                let message = format!("hook identity collides with a control marker for {owner}");
+                self.failures
+                    .write()
+                    .await
+                    .insert(id.clone(), message.clone());
+                delta.failed.push((id, message));
+                continue;
+            }
+            if let Some(message) = base_control_collision(&id, &candidate_ids) {
+                self.failures
+                    .write()
+                    .await
+                    .insert(id.clone(), message.clone());
+                delta.failed.push((id, message));
+                continue;
+            }
             // Copy first, then derive identity and validate from that private snapshot. Authored
             // files remain live and may change at any time; they are never used after this point
             // in the candidate transaction.
@@ -190,14 +249,22 @@ impl HookRegistry {
                 .await
                 .is_some_and(|current| current.revision == revision)
             {
-                ensure_marker(&self.generated_skills_root, &id)?;
                 delta.unchanged.push(id);
                 continue;
             }
 
             match self.prepare_candidate(&id, &revision, snapshot).await {
                 Ok(candidate) => {
-                    ensure_marker(&self.generated_skills_root, &id)?;
+                    if let Some(message) =
+                        stateful_control_collision(&id, &candidate.metadata, &candidate_ids)
+                    {
+                        self.failures
+                            .write()
+                            .await
+                            .insert(id.clone(), message.clone());
+                        delta.failed.push((id, message));
+                        continue;
+                    }
                     persist_current_manifest(&self.revisions_root, &candidate)?;
                     self.current
                         .write()
@@ -220,10 +287,10 @@ impl HookRegistry {
         for id in existing_ids.difference(&candidate_ids) {
             self.current.write().await.remove(id);
             self.failures.write().await.remove(id);
-            remove_marker(&self.generated_skills_root, id)?;
             remove_current_manifest(&self.revisions_root, id)?;
             delta.removed.push(id.clone());
         }
+        self.reconcile_markers().await?;
         delta.published.sort();
         delta.removed.sort();
         delta.unchanged.sort();
@@ -250,7 +317,6 @@ impl HookRegistry {
             }
             match self.restore_current_manifest(&id, &entry.path()).await {
                 Ok(Some(revision)) => {
-                    ensure_marker(&self.generated_skills_root, &id)?;
                     self.current
                         .write()
                         .await
@@ -320,6 +386,40 @@ impl HookRegistry {
             source_dir,
             metadata,
         )))
+    }
+
+    async fn reconcile_markers(&self) -> Result<(), RegistryError> {
+        let revisions = self.all().await;
+        let mut desired = HashMap::new();
+        for revision in revisions {
+            insert_marker(
+                &mut desired,
+                revision.id.as_str().to_owned(),
+                MarkerIntent::Primary(revision.id.clone()),
+            )?;
+            for operation in [ControlOperation::Start, ControlOperation::Stop] {
+                insert_control_marker(&mut desired, &revision.id, operation)?;
+            }
+            if revision.metadata.persistent_agent_sessions {
+                for operation in [ControlOperation::Pause, ControlOperation::Resume] {
+                    insert_control_marker(&mut desired, &revision.id, operation)?;
+                }
+            }
+        }
+
+        let existing = discover_marker_ids(&self.generated_skills_root)?;
+        for (name, intent) in &desired {
+            ensure_marker(&self.generated_skills_root, name, intent)?;
+        }
+        let desired_ids = desired
+            .keys()
+            .filter_map(|name| HookId::parse(name.clone()).ok())
+            .collect::<HashSet<_>>();
+        for stale in existing.difference(&desired_ids) {
+            remove_marker(&self.generated_skills_root, stale.as_str())?;
+        }
+        *self.marker_catalog.write().await = desired;
+        Ok(())
     }
 
     async fn prepare_candidate(
@@ -586,34 +686,144 @@ fn ignored_name(name: &OsStr) -> bool {
     ) || name.to_string_lossy().ends_with(".pyc")
 }
 
-fn marker_content(id: &HookId) -> String {
+fn marker_name(id: &HookId, operation: ControlOperation) -> String {
+    format!("{}-{}", id.as_str(), operation.suffix())
+}
+
+fn insert_control_marker(
+    catalog: &mut HashMap<String, MarkerIntent>,
+    hook: &HookId,
+    operation: ControlOperation,
+) -> Result<(), RegistryError> {
+    insert_marker(
+        catalog,
+        marker_name(hook, operation),
+        MarkerIntent::Control {
+            hook: hook.clone(),
+            operation,
+        },
+    )
+}
+
+fn insert_marker(
+    catalog: &mut HashMap<String, MarkerIntent>,
+    name: String,
+    intent: MarkerIntent,
+) -> Result<(), RegistryError> {
+    if let Some(existing) = catalog.insert(name.clone(), intent.clone()) {
+        let hook = match intent {
+            MarkerIntent::Primary(hook) | MarkerIntent::Control { hook, .. } => hook,
+        };
+        catalog.insert(name.clone(), existing);
+        return Err(RegistryError::Validation {
+            hook,
+            message: format!("generated marker name {name} collides with another hook"),
+        });
+    }
+    Ok(())
+}
+
+fn control_marker_owners(
+    revisions: &HashMap<HookId, Arc<HookRevision>>,
+    retained_ids: &HashSet<HookId>,
+) -> HashMap<String, HookId> {
+    let mut owners = HashMap::new();
+    for revision in revisions
+        .values()
+        .filter(|revision| retained_ids.contains(&revision.id))
+    {
+        for operation in [ControlOperation::Start, ControlOperation::Stop] {
+            owners.insert(marker_name(&revision.id, operation), revision.id.clone());
+        }
+        if revision.metadata.persistent_agent_sessions {
+            for operation in [ControlOperation::Pause, ControlOperation::Resume] {
+                owners.insert(marker_name(&revision.id, operation), revision.id.clone());
+            }
+        }
+    }
+    owners
+}
+
+fn base_control_collision(id: &HookId, candidate_ids: &HashSet<HookId>) -> Option<String> {
+    [ControlOperation::Start, ControlOperation::Stop]
+        .into_iter()
+        .map(|operation| marker_name(id, operation))
+        .find(|name| {
+            candidate_ids
+                .iter()
+                .any(|candidate| candidate.as_str() == name)
+        })
+        .map(|name| format!("generated marker name {name} collides with an authored hook"))
+}
+
+fn stateful_control_collision(
+    id: &HookId,
+    metadata: &HookMetadata,
+    candidate_ids: &HashSet<HookId>,
+) -> Option<String> {
+    metadata.persistent_agent_sessions.then_some(())?;
+    [ControlOperation::Pause, ControlOperation::Resume]
+        .into_iter()
+        .map(|operation| marker_name(id, operation))
+        .find(|name| {
+            candidate_ids
+                .iter()
+                .any(|candidate| candidate.as_str() == name)
+        })
+        .map(|name| format!("generated marker name {name} collides with an authored hook"))
+}
+
+fn marker_content(name: &str, intent: &MarkerIntent) -> String {
+    let description = match intent {
+        MarkerIntent::Primary(hook) => format!("Activate the {hook} Warden hook for this turn."),
+        MarkerIntent::Control { hook, operation } => format!(
+            "{} continuous activation of the {hook} Warden hook for this task.",
+            match operation {
+                ControlOperation::Start => "Start",
+                ControlOperation::Pause => "Pause",
+                ControlOperation::Resume => "Resume",
+                ControlOperation::Stop => "Stop",
+            }
+        ),
+    };
     format!(
-        "---\nname: {}\ndescription: Activate the {} Warden hook for this turn.\n---\n\n{}\n",
-        id.as_str(),
-        id.as_str(),
+        "---\nname: {name}\ndescription: {description}\n---\n\n{}\n",
         MARKER_BODY
     )
 }
 
-fn ensure_marker(root: &Path, id: &HookId) -> Result<(), RegistryError> {
-    let directory = root.join(id.as_str());
+fn ensure_marker(root: &Path, name: &str, intent: &MarkerIntent) -> Result<(), RegistryError> {
+    let directory = root.join(name);
     create_dir(&directory)?;
     let path = directory.join("SKILL.md");
-    let wanted = marker_content(id);
+    let wanted = marker_content(name, intent);
     if fs::read_to_string(&path).ok().as_deref() == Some(&wanted) {
         return Ok(());
+    }
+    if path.exists()
+        && !fs::read_to_string(&path)
+            .ok()
+            .is_some_and(|existing| existing.contains(MARKER_BODY))
+    {
+        let hook = match intent {
+            MarkerIntent::Primary(hook) | MarkerIntent::Control { hook, .. } => hook.clone(),
+        };
+        return Err(RegistryError::Validation {
+            hook,
+            message: format!("refusing to overwrite non-Warden marker {name}"),
+        });
     }
     let temporary = directory.join(format!(".SKILL.md.{}", uuid::Uuid::new_v4()));
     fs::write(&temporary, wanted).map_err(|source| io_error(temporary.clone(), source))?;
     fs::rename(&temporary, &path).map_err(|source| io_error(path, source))
 }
 
-fn remove_marker(root: &Path, id: &HookId) -> Result<(), RegistryError> {
-    let directory = root.join(id.as_str());
+fn remove_marker(root: &Path, name: &str) -> Result<(), RegistryError> {
+    let directory = root.join(name);
     if !directory.exists() {
         return Ok(());
     }
-    let tombstone = root.join(format!(".removed-{}-{}", id, uuid::Uuid::new_v4()));
+    let tombstone = root.join(format!(".removed-{name}-{}", uuid::Uuid::new_v4()));
     fs::rename(&directory, &tombstone).map_err(|source| io_error(directory, source))?;
     fs::remove_dir_all(&tombstone).map_err(|source| io_error(tombstone, source))
 }
@@ -690,6 +900,7 @@ mod tests {
             events: HashSet::from([HookEventKind::UserPromptSubmitted]),
             actions: HashSet::new(),
             blocking: false,
+            persistent_agent_sessions: false,
         }
     }
 
@@ -700,7 +911,9 @@ mod tests {
             if text.contains("INVALID") {
                 return Err("invalid candidate".into());
             }
-            Ok(metadata())
+            let mut prepared = metadata();
+            prepared.persistent_agent_sessions = text.contains("STATEFUL");
+            Ok(prepared)
         }
     }
 
@@ -816,6 +1029,10 @@ mod tests {
             MARKER_BODY
         );
         assert!(!temp.path().join("hooks.json").exists());
+        assert!(temp.path().join("skills/demo-start/SKILL.md").is_file());
+        assert!(temp.path().join("skills/demo-stop/SKILL.md").is_file());
+        assert!(!temp.path().join("skills/demo-pause").exists());
+        assert!(!temp.path().join("skills/demo-resume").exists());
 
         let original = registry
             .current(&HookId::parse("demo").unwrap())
@@ -832,6 +1049,75 @@ mod tests {
             fs::read_to_string(&original.hook_file)
                 .unwrap()
                 .contains("pass")
+        );
+    }
+
+    #[tokio::test]
+    async fn stateful_revision_adds_pause_resume_and_stateless_revision_removes_them() {
+        let temp = TempDir::new().unwrap();
+        let registry = registry(&temp);
+        let authored = temp.path().join("hooks/demo");
+        fs::create_dir_all(&authored).unwrap();
+        fs::write(authored.join("hook.py"), "# STATEFUL\ndef run(event): pass").unwrap();
+        registry.refresh().await.unwrap();
+
+        for name in [
+            "demo",
+            "demo-start",
+            "demo-pause",
+            "demo-resume",
+            "demo-stop",
+        ] {
+            let path = temp.path().join("skills").join(name).join("SKILL.md");
+            assert!(path.is_file(), "missing {name}");
+            assert_eq!(
+                fs::read_to_string(path)
+                    .unwrap()
+                    .split("---\n\n")
+                    .nth(1)
+                    .unwrap()
+                    .trim_end(),
+                MARKER_BODY
+            );
+        }
+        assert!(matches!(
+            registry.marker_intent("demo-pause").await,
+            Some(MarkerIntent::Control {
+                operation: ControlOperation::Pause,
+                ..
+            })
+        ));
+
+        fs::write(authored.join("hook.py"), "def run(event): pass").unwrap();
+        registry.refresh().await.unwrap();
+        assert!(!temp.path().join("skills/demo-pause").exists());
+        assert!(!temp.path().join("skills/demo-resume").exists());
+        assert!(temp.path().join("skills/demo-start/SKILL.md").is_file());
+        assert!(temp.path().join("skills/demo-stop/SKILL.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn authored_hook_colliding_with_generated_start_is_rejected_without_overwrite() {
+        let temp = TempDir::new().unwrap();
+        let registry = registry(&temp);
+        for name in ["demo", "demo-start"] {
+            let authored = temp.path().join("hooks").join(name);
+            fs::create_dir_all(&authored).unwrap();
+            fs::write(authored.join("hook.py"), "def run(event): pass").unwrap();
+        }
+        let delta = registry.refresh().await.unwrap();
+        assert!(delta.failed.iter().any(|(hook, _)| hook.as_str() == "demo"));
+        assert!(
+            registry
+                .current(&HookId::parse("demo").unwrap())
+                .await
+                .is_none()
+        );
+        assert!(
+            registry
+                .current(&HookId::parse("demo-start").unwrap())
+                .await
+                .is_some()
         );
     }
 

@@ -40,7 +40,7 @@ enum Command {
         #[arg(long)]
         manage_gui: bool,
     },
-    /// Report transport, hook-registry, and lifecycle coverage health.
+    /// Report transport, hook-registry, continuous-session, and lifecycle coverage health.
     Health,
     /// Remove only Warden-owned Codex native bridge entries.
     RemoveNativeBridges {

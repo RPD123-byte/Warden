@@ -81,13 +81,14 @@ async fn first_startup_attaches_markers_trusts_exact_bridge_hashes_and_reports_r
             let _ = shutdown_rx.await;
         }));
         wait_for(&socket_for_health).await;
-        assert!(
-            paths
-                .root
-                .parent()
-                .unwrap()
-                .join("codex/skills/create-warden-hook/SKILL.md")
-                .is_file()
+        let installed_authoring_skill = paths
+            .root
+            .parent()
+            .unwrap()
+            .join("codex/skills/create-warden-hook/SKILL.md");
+        assert_eq!(
+            std::fs::read_to_string(installed_authoring_skill).unwrap(),
+            include_str!("../.agents/skills/create-warden-hook/SKILL.md")
         );
         assert!(paths.native_hooks.join("bridge.py").is_file());
         assert!(paths.hooks.join("unspecified-decisions/hook.py").is_file());

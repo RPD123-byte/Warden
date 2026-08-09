@@ -158,6 +158,11 @@ mod macos {
         thread_id: &str,
         turn_id: &str,
     ) -> Result<(), String> {
+        let marker_name = marker
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid marker path {}", marker.display()))?;
         let response = send_native(
             socket,
             credential,
@@ -166,7 +171,7 @@ mod macos {
                 "session_id":thread_id,
                 "turn_id":turn_id,
                 "cwd":"/tmp",
-                "prompt":format!("[$unspecified-decisions]({}) monitor", marker.display()),
+                "prompt":format!("[${marker_name}]({}) monitor", marker.display()),
             }),
         )
         .await;
@@ -222,7 +227,7 @@ mod macos {
     }
 
     #[tokio::test]
-    #[ignore = "creates a disposable Codex task and invokes local Claude Sonnet twice"]
+    #[ignore = "creates a disposable Codex task and verifies live start/pause/resume with Claude Sonnet"]
     async fn bundled_monitor_interrupts_delivers_questions_and_resumes_claude() {
         assert_eq!(
             std::env::var("WARDEN_LIVE_DECISION_TEST").as_deref(),
@@ -264,8 +269,26 @@ mod macos {
                         let _ = shutdown_rx.await;
                     },
                 ));
-                let marker = paths.generated_skills.join(HOOK_ID).join("SKILL.md");
-                wait_for(&marker).await;
+                let start_marker = paths
+                    .generated_skills
+                    .join(format!("{HOOK_ID}-start"))
+                    .join("SKILL.md");
+                let pause_marker = paths
+                    .generated_skills
+                    .join(format!("{HOOK_ID}-pause"))
+                    .join("SKILL.md");
+                let resume_marker = paths
+                    .generated_skills
+                    .join(format!("{HOOK_ID}-resume"))
+                    .join("SKILL.md");
+                let stop_marker = paths
+                    .generated_skills
+                    .join(format!("{HOOK_ID}-stop"))
+                    .join("SKILL.md");
+                wait_for(&start_marker).await;
+                wait_for(&pause_marker).await;
+                wait_for(&resume_marker).await;
+                wait_for(&stop_marker).await;
                 wait_for(&paths.action_socket).await;
                 let credential = fs::read_to_string(&paths.bridge_credential).unwrap();
 
@@ -284,7 +307,7 @@ mod macos {
                     activate_turn(
                         &paths.action_socket,
                         credential.trim(),
-                        &marker,
+                        &start_marker,
                         &thread_id,
                         &first_turn,
                     )
@@ -339,7 +362,28 @@ mod macos {
                     activate_turn(
                         &paths.action_socket,
                         credential.trim(),
-                        &marker,
+                        &pause_marker,
+                        &thread_id,
+                        &second_turn,
+                    )
+                    .await?;
+                    let paused_review = send_native_post_tool(
+                        &paths.action_socket,
+                        credential.trim(),
+                        &thread_id,
+                        &second_turn,
+                        "This event is emitted while the continuous supervisor is paused.",
+                    )
+                    .await;
+                    if !paused_review.ok
+                        || paused_review.result.as_ref().unwrap()["blocking"] != 0
+                    {
+                        return Err(format!("paused review unexpectedly ran: {paused_review:?}"));
+                    }
+                    activate_turn(
+                        &paths.action_socket,
+                        credential.trim(),
+                        &resume_marker,
                         &thread_id,
                         &second_turn,
                     )
@@ -373,6 +417,27 @@ mod macos {
                         <= first_sequence
                     {
                         return Err("persistent session cursor did not advance".into());
+                    }
+                    activate_turn(
+                        &paths.action_socket,
+                        credential.trim(),
+                        &stop_marker,
+                        &thread_id,
+                        "continuous-stop-check",
+                    )
+                    .await?;
+                    let stopped_review = send_native_post_tool(
+                        &paths.action_socket,
+                        credential.trim(),
+                        &thread_id,
+                        "continuous-stop-check",
+                        "This event is emitted after continuous monitoring was stopped.",
+                    )
+                    .await;
+                    if !stopped_review.ok
+                        || stopped_review.result.as_ref().unwrap()["blocking"] != 0
+                    {
+                        return Err(format!("stopped review unexpectedly ran: {stopped_review:?}"));
                     }
                     Ok(())
                 }

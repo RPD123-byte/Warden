@@ -20,6 +20,10 @@ import uuid
 from .client import PROTOCOL_VERSION, WardenClient, bind_client
 from .events import HookEvent
 from .hooks import HookFunction, HookMetadata, find_hook, hook_arity
+from .modules._agent import (
+    _persistent_session_declarations,
+    _reset_persistent_session_declarations,
+)
 
 
 DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -78,6 +82,7 @@ class LoadedHook:
     metadata: HookMetadata
     import_stdout: str
     import_stderr: str
+    persistent_agent_sessions: bool
 
 
 class WorkerInputError(ValueError):
@@ -115,6 +120,7 @@ def load_hook(
         search_paths.insert(0, str(Path(modules_root).resolve()))
     for search_path in reversed(search_paths):
         sys.path.insert(0, search_path)
+    _reset_persistent_session_declarations()
     try:
         with redirect_stdout(stdout), redirect_stderr(stderr):
             spec.loader.exec_module(module)
@@ -129,12 +135,14 @@ def load_hook(
                 pass
 
     function, metadata = find_hook(vars(module))
+    persistent_agent_sessions = bool(_persistent_session_declarations())
     return LoadedHook(
         name=name,
         function=function,
         metadata=metadata,
         import_stdout=stdout.render(),
         import_stderr=stderr.render(),
+        persistent_agent_sessions=persistent_agent_sessions,
     )
 
 
@@ -170,6 +178,7 @@ async def serve(hook_path: Path, hook_name: str | None = None) -> int:
                 "events": [event.value for event in loaded.metadata.events],
                 "actions": [action.value for action in loaded.metadata.actions],
                 "blocking": loaded.metadata.blocking,
+                "persistent_agent_sessions": loaded.persistent_agent_sessions,
                 "is_async": inspect.iscoroutinefunction(loaded.function),
             },
             "logs": {

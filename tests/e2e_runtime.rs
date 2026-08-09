@@ -287,6 +287,95 @@ async fn hot_created_marker_routes_one_selected_turn_and_not_the_next() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(line_count(&output), 6);
 
+        let start_marker = paths
+            .generated_skills
+            .join("record-events-start/SKILL.md");
+        let stop_marker = paths
+            .generated_skills
+            .join("record-events-stop/SKILL.md");
+        assert!(start_marker.is_file());
+        assert!(stop_marker.is_file());
+        assert!(!paths.generated_skills.join("record-events-pause").exists());
+        assert!(!paths.generated_skills.join("record-events-resume").exists());
+
+        server_for_run
+            .emit_notification(
+                "turn/started",
+                json!({"threadId":"thread","turn":{"id":"continuous-start","status":"inProgress","items":[
+                    {"id":"user-continuous-start","type":"userMessage","content":[
+                        {"type":"text","text":format!("[$record-events-start]({}) start continuously", start_marker.display())}
+                    ]}
+                ]}}),
+            )
+            .await;
+        wait_until(Duration::from_secs(10), || line_count(&output) == 8).await;
+
+        server_for_run
+            .emit_notification(
+                "turn/started",
+                json!({"threadId":"thread","turn":{"id":"continuous-later","status":"inProgress","items":[
+                    {"id":"user-continuous-later","type":"userMessage","content":[{"type":"text","text":"still monitored without a marker"}]}
+                ]}}),
+            )
+            .await;
+        server_for_run
+            .emit_notification(
+                "item/completed",
+                json!({"threadId":"thread","turnId":"continuous-later","item":{"id":"continuous-tool","type":"commandExecution","status":"completed"}}),
+            )
+            .await;
+        server_for_run
+            .emit_notification(
+                "turn/completed",
+                json!({"threadId":"thread","turn":{"id":"continuous-later","status":"completed"}}),
+            )
+            .await;
+        wait_until(Duration::from_secs(10), || line_count(&output) == 12).await;
+        let running_health = daemon_health(&paths.action_socket).await;
+        assert_eq!(running_health["daemon"]["continuous_sessions"]["running"], 1);
+        assert_eq!(running_health["daemon"]["continuous_sessions"]["paused"], 0);
+
+        server_for_run
+            .emit_notification(
+                "turn/started",
+                json!({"threadId":"thread","turn":{"id":"continuous-stop","status":"inProgress","items":[
+                    {"id":"user-continuous-stop","type":"userMessage","content":[
+                        {"type":"text","text":format!("[$record-events-stop]({}) stop continuously", stop_marker.display())}
+                    ]}
+                ]}}),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(line_count(&output), 12);
+        let stopped_health = daemon_health(&paths.action_socket).await;
+        assert_eq!(stopped_health["daemon"]["continuous_sessions"]["running"], 0);
+
+        server_for_run
+            .emit_notification(
+                "turn/started",
+                json!({"threadId":"thread","turn":{"id":"archive-start","status":"inProgress","items":[
+                    {"id":"user-archive-start","type":"userMessage","content":[
+                        {"type":"text","text":format!("[$record-events-start]({}) start before archive", start_marker.display())}
+                    ]}
+                ]}}),
+            )
+            .await;
+        wait_until(Duration::from_secs(10), || line_count(&output) == 14).await;
+        server_for_run
+            .emit_notification("thread/archived", json!({"threadId":"thread"}))
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let health = daemon_health(&paths.action_socket).await;
+                if health["daemon"]["continuous_sessions"]["running"] == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("archiving the source task did not remove continuous state");
+
         let lines = fs::read_to_string(&output).unwrap();
         assert!(lines.contains("\"kind\":\"user_prompt_submitted\""));
         assert!(lines.contains("\"kind\":\"post_tool_use\""));

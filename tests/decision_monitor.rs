@@ -219,6 +219,18 @@ fn native_request(id: &str, params: Value) -> GatewayRequest {
     }
 }
 
+fn health_request(id: &str) -> GatewayRequest {
+    GatewayRequest {
+        message_type: "request".into(),
+        protocol_version: ACTION_PROTOCOL_VERSION,
+        id: id.into(),
+        method: "warden.health".into(),
+        params: json!({}),
+        context: None,
+        bridge_auth: None,
+    }
+}
+
 fn install_fake_claude(temp: &TempDir) -> PathBuf {
     let path = temp.path().join("claude");
     fs::write(&path, FAKE_CLAUDE).unwrap();
@@ -299,9 +311,22 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
             python.clone(),
         );
         registry.refresh().await.unwrap();
-        let marker = paths
+        let marker = paths.generated_skills.join("unspecified-decisions/SKILL.md");
+        let start_marker = paths
             .generated_skills
-            .join("unspecified-decisions/SKILL.md");
+            .join("unspecified-decisions-start/SKILL.md");
+        let pause_marker = paths
+            .generated_skills
+            .join("unspecified-decisions-pause/SKILL.md");
+        let resume_marker = paths
+            .generated_skills
+            .join("unspecified-decisions-resume/SKILL.md");
+        let stop_marker = paths
+            .generated_skills
+            .join("unspecified-decisions-stop/SKILL.md");
+        for path in [&start_marker, &pause_marker, &resume_marker, &stop_marker] {
+            assert!(path.is_file(), "missing stateful control marker {}", path.display());
+        }
         let gateway = ActionGateway::new(handle.clone(), paths.action_socket.clone(), backend)
             .with_native_hook_runtime(
                 ActivationRouter::new(paths.generated_skills.clone(), registry),
@@ -348,7 +373,7 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
                 json!({
                     "hook_event_name":"UserPromptSubmit", "session_id":"thread-a",
                     "turn_id":"turn-thread-a", "cwd":temp.path(),
-                    "prompt":format!("[$unspecified-decisions]({}) review", marker.display())
+                    "prompt":format!("[$unspecified-decisions-start]({}) review continuously", start_marker.display())
                 }),
             ))
             .await;
@@ -374,6 +399,60 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
                 .unwrap()
                 .contains("Initial specification")
         );
+
+        let pause = gateway
+            .dispatch(native_request(
+                "pause-a",
+                json!({
+                    "hook_event_name":"UserPromptSubmit", "session_id":"thread-a",
+                    "turn_id":"pause-thread-a", "cwd":temp.path(),
+                    "prompt":format!("[$unspecified-decisions-pause]({}) pause", pause_marker.display())
+                }),
+            ))
+            .await;
+        assert!(pause.ok, "{pause:?}");
+        let paused_health = gateway.dispatch(health_request("paused-health")).await;
+        assert_eq!(
+            paused_health.result.unwrap()["daemon"]["continuous_sessions"]["paused"],
+            1
+        );
+        let paused = gateway
+            .dispatch(native_request(
+                "paused-post-tool",
+                json!({
+                    "hook_event_name":"PostToolUse", "session_id":"thread-a",
+                    "turn_id":"pause-thread-a", "cwd":temp.path(), "tool_use_id":"paused-tool",
+                    "tool_name":"shell", "tool_response":{"ok":true}
+                }),
+            ))
+            .await;
+        assert!(paused.ok, "{paused:?}");
+        assert_eq!(paused.result.unwrap()["blocking"], 0);
+        assert_eq!(fs::read_to_string(&args_log).unwrap().lines().count(), 1);
+
+        let resume = gateway
+            .dispatch(native_request(
+                "resume-a",
+                json!({
+                    "hook_event_name":"UserPromptSubmit", "session_id":"thread-a",
+                    "turn_id":"resume-thread-a", "cwd":temp.path(),
+                    "prompt":format!("[$unspecified-decisions-resume]({}) resume", resume_marker.display())
+                }),
+            ))
+            .await;
+        assert!(resume.ok, "{resume:?}");
+        let resumed = gateway
+            .dispatch(native_request(
+                "resumed-post-tool",
+                json!({
+                    "hook_event_name":"PostToolUse", "session_id":"thread-a",
+                    "turn_id":"resume-thread-a", "cwd":temp.path(), "tool_use_id":"resumed-tool",
+                    "tool_name":"shell", "tool_response":{"ok":true}
+                }),
+            ))
+            .await;
+        assert!(resumed.ok, "{resumed:?}");
+        assert_eq!(resumed.result.unwrap()["blocking"], 1);
 
         let stop_started = Instant::now();
         let stop = gateway
@@ -437,6 +516,35 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
         .await
         .expect("turn-start must run after interruption disconnects the native bridge");
 
+        let stopped = gateway
+            .dispatch(native_request(
+                "stop-continuous-a",
+                json!({
+                    "hook_event_name":"UserPromptSubmit", "session_id":"thread-a",
+                    "turn_id":"stop-continuous-thread-a", "cwd":temp.path(),
+                    "prompt":format!("[$unspecified-decisions-stop]({}) stop", stop_marker.display())
+                }),
+            ))
+            .await;
+        assert!(stopped.ok, "{stopped:?}");
+        let stopped_health = gateway.dispatch(health_request("stopped-health")).await;
+        assert_eq!(
+            stopped_health.result.unwrap()["daemon"]["continuous_sessions"]["running"],
+            0
+        );
+        let after_stop = gateway
+            .dispatch(native_request(
+                "after-stop-a",
+                json!({
+                    "hook_event_name":"PostToolUse", "session_id":"thread-a",
+                    "turn_id":"stop-continuous-thread-a", "cwd":temp.path(), "tool_use_id":"after-stop-tool",
+                    "tool_name":"shell", "tool_response":{"ok":true}
+                }),
+            ))
+            .await;
+        assert!(after_stop.ok, "{after_stop:?}");
+        assert_eq!(after_stop.result.unwrap()["blocking"], 0);
+
         server_for_run
             .emit_notification(
                 "turn/started",
@@ -475,6 +583,7 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
                 "history",
                 "no_action",
                 "no_action",
+                "no_action",
                 "interrupt",
                 "start",
                 "history",
@@ -484,12 +593,13 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
         );
         let args = fs::read_to_string(&args_log).unwrap();
         let invocations = args.lines().collect::<Vec<_>>();
-        assert_eq!(invocations.len(), 4);
+        assert_eq!(invocations.len(), 5);
         assert!(invocations.iter().all(|args| args.contains("--model sonnet")));
         assert!(invocations[0].contains("--session-id"));
         assert!(invocations[1].contains("--resume"));
         assert!(invocations[2].contains("--resume"));
-        assert!(invocations[3].contains("--session-id"));
+        assert!(invocations[3].contains("--resume"));
+        assert!(invocations[4].contains("--session-id"));
 
         let requests = server_for_run.received().await;
         let control_methods = requests

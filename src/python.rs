@@ -495,6 +495,7 @@ impl PythonRuntime {
                 events: HashSet::new(),
                 actions: HashSet::new(),
                 blocking: false,
+                persistent_agent_sessions: false,
             },
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -621,6 +622,7 @@ impl WorkerProcess {
             events: hook.events.into_iter().collect(),
             actions: hook.actions.into_iter().collect(),
             blocking: hook.blocking,
+            persistent_agent_sessions: hook.persistent_agent_sessions,
         };
         Ok(Self {
             child,
@@ -751,6 +753,8 @@ struct WorkerHookMetadata {
     actions: Vec<String>,
     #[serde(default)]
     blocking: bool,
+    #[serde(default)]
+    persistent_agent_sessions: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -996,6 +1000,8 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(!handshake.hook.unwrap().blocking);
+        let hook = handshake.hook.unwrap();
+        assert!(!hook.blocking);
+        assert!(!hook.persistent_agent_sessions);
     }
 }

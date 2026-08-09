@@ -13,6 +13,7 @@ pub struct DataPaths {
     pub generated_skills: PathBuf,
     pub runtimes: PathBuf,
     pub sessions: PathBuf,
+    pub continuous_sessions: PathBuf,
     pub installations: PathBuf,
     pub native_hooks: PathBuf,
     pub bridge_credential: PathBuf,
@@ -28,6 +29,7 @@ impl DataPaths {
             generated_skills: root.join("generated-skills"),
             runtimes: root.join("runtimes"),
             sessions: root.join("sessions"),
+            continuous_sessions: root.join("continuous-sessions"),
             installations: root.join("installations"),
             native_hooks: root.join("native-hooks"),
             bridge_credential: root.join("bridge-auth"),
@@ -44,6 +46,7 @@ impl DataPaths {
             &self.generated_skills,
             &self.runtimes,
             &self.sessions,
+            &self.continuous_sessions,
             &self.installations,
             &self.native_hooks,
         ] {
