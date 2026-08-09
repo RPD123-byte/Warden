@@ -1,0 +1,11 @@
+.DS_Store
+target/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+tooling/openspec/node_modules/

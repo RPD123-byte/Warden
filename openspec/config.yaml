@@ -1,0 +1,33 @@
+schema: spec-driven
+
+context: |
+  This project is a long-running local Rust host daemon built on the codex-control
+  package from https://github.com/RPD123-byte/Warden, whose local dependency checkout
+  is /Users/computer/codex-app-control.
+
+  The dependency already provides shared Codex app-server transport, authoritative
+  Arc<SequencedEvent> ingestion, bounded in-memory event storage, lifecycle and delta
+  streams, thread snapshots and queries, and explicit start/steer/interrupt actions.
+  This project owns the higher-level Warden-hook runtime rather than changing Codex's
+  native hooks.json bundle.
+
+  Every Warden hook is explicitly activated for one Codex user turn through a mandatory
+  generated Codex skill. The generated SKILL.md is a marker only and its body is exactly:
+  "This skill is an activation marker for the local Warden service. Ignore"
+  Hook logic lives outside the generated skill.
+
+  Prefer code-first hooks, strong defaults, and minimal author configuration. The exact
+  incoming event is passed to hook code automatically. Python hooks may declare runtime
+  dependencies that Warden installs and caches. Claude and Codex runners support both
+  fresh inference and explicitly requested persistent conversation context. Do not expose
+  process-lifetime or event-to-prompt plumbing as routine hook configuration.
+
+rules:
+  proposal:
+    - Keep the scope focused on the host daemon and Warden-hook runtime.
+    - Distinguish generated marker skills from Codex native hooks.
+  design:
+    - Prefer defaults and conventions over configuration fields.
+    - Identify which behavior belongs in this host and which belongs in codex-control.
+  tasks:
+    - Include dependency integration and contract tests against codex-control seams.

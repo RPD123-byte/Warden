@@ -1,0 +1,12 @@
+{
+  "name": "robust-engineering-openspec-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenSpec authoring tools for the robust-engineering host project.",
+  "scripts": {
+    "openspec:validate": "cd ../.. && ./tooling/openspec/node_modules/.bin/openspec validate add-warden-hook-runtime --strict"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "^1.8.0"
+  }
+}
