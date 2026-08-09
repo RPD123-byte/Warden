@@ -13,7 +13,7 @@ members = ["crates/warden-agent"]
 anyhow = "1.0"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
-codex-control = { git = "https://github.com/RPD123-byte/codex-warden.git", rev = "8f2f5bf9de97ddaea66974eeba1cc82382423277", package = "codex-control" }
+codex-control = { git = "https://github.com/RPD123-byte/codex-warden.git", rev = "4426cc916fa503a38ac04bce3252a5dc35be7501", package = "codex-control" }
 dirs = "6.0"
 fs2 = "0.4"
 hex = "0.4"
@@ -30,7 +30,7 @@ warden-agent = { path = "crates/warden-agent" }
 
 [dev-dependencies]
 tempfile = "3.23"
-transport = { git = "https://github.com/RPD123-byte/codex-warden.git", rev = "8f2f5bf9de97ddaea66974eeba1cc82382423277" }
+transport = { git = "https://github.com/RPD123-byte/codex-warden.git", rev = "4426cc916fa503a38ac04bce3252a5dc35be7501" }
 
 [[bin]]
 name = "warden-daemon"

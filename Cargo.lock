@@ -160,7 +160,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "codex-control"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "anyhow",
  "control",
@@ -190,7 +190,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "control"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "async-trait",
  "protocol",
@@ -441,7 +441,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 [[package]]
 name = "ingest"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "async-trait",
  "protocol",
@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "protocol"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "quote",
  "schemars",
@@ -774,7 +774,7 @@ dependencies = [
 [[package]]
 name = "reducer"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "protocol",
  "serde",
@@ -993,7 +993,7 @@ dependencies = [
 [[package]]
 name = "store"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "protocol",
  "serde",
@@ -1004,7 +1004,7 @@ dependencies = [
 [[package]]
 name = "streaming"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "protocol",
  "reducer",
@@ -1020,7 +1020,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "supervisor"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "async-trait",
  "serde",
@@ -1197,7 +1197,7 @@ dependencies = [
 [[package]]
 name = "transport"
 version = "0.1.0"
-source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=8f2f5bf9de97ddaea66974eeba1cc82382423277#8f2f5bf9de97ddaea66974eeba1cc82382423277"
+source = "git+https://github.com/RPD123-byte/codex-warden.git?rev=4426cc916fa503a38ac04bce3252a5dc35be7501#4426cc916fa503a38ac04bce3252a5dc35be7501"
 dependencies = [
  "async-trait",
  "futures-util",
