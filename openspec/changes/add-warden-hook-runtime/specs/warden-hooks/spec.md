@@ -5,7 +5,7 @@ Provide a simple, code-first automation surface that runs user-defined Warden lo
 ## ADDED Requirements
 
 ### Requirement: Every Warden hook has a mandatory marker skill
-The system SHALL generate one Codex skill for every discovered Warden hook, derive the skill identity from the hook identity, and make the generated skill available through the managed app-server skill roots. The generated `SKILL.md` body SHALL be exactly `This skill is an activation marker for the local Warden service. Ignore` and SHALL contain no hook implementation logic.
+The system SHALL generate one canonical Codex skill for every discovered Warden hook, derive the skill identity from the hook identity, and make the generated skill available through the managed app-server skill roots. Warden SHALL expose Warden-owned symlink shims for each generated marker under both `$CODEX_HOME/skills` and `$HOME/.agents/skills`. It SHALL preserve any non-Warden file, directory, or symlink that collides at a shim destination. The generated `SKILL.md` body SHALL be exactly `This skill is an activation marker for the local Warden service. Ignore` and SHALL contain no hook implementation logic.
 
 #### Scenario: Newly created hook becomes selectable
 - **WHEN** a valid Warden hook is added while the daemon and a Codex app-server are running
@@ -14,6 +14,16 @@ The system SHALL generate one Codex skill for every discovered Warden hook, deri
 #### Scenario: App-server reconnects
 - **WHEN** Warden reconnects to or begins managing an app-server
 - **THEN** the system attaches the generated marker-skill root to that app-server before relying on marker-skill activation
+
+#### Scenario: User skill roots are reconciled
+- **WHEN** Warden publishes, updates, or removes a generated marker
+- **THEN** its Warden-owned shims under both the Codex and Agents user skill roots match the current canonical marker set
+- **AND** the local Codex skill API can discover the marker from the standard Agents user skill root regardless of whether a client UI renders it in a picker
+
+#### Scenario: A user-owned skill collides with a marker
+- **WHEN** a non-Warden entry already exists at either user skill shim path
+- **THEN** Warden leaves that entry unchanged
+- **AND** the canonical marker remains published without deleting user data
 
 ### Requirement: Marker activation is scoped to one user turn
 The system SHALL activate a Warden hook only when the starting input of a Codex turn contains Codex's selected-skill representation for that hook under Warden's generated skill root. The resolver SHALL support structured skill input when present and the installed Codex Desktop app-server's leading `[$name](absolute/SKILL.md)` marker link, and SHALL canonicalize the selected path before activation. The activation SHALL apply to matching events from that turn and SHALL expire when the turn becomes terminal.
@@ -100,7 +110,7 @@ The system SHALL contain hook exceptions, process crashes, invalid output, and t
 - **THEN** Warden records the failure for that invocation and continues processing other hooks and Codex events
 
 ### Requirement: Warden provides a hook-creation skill
-The system SHALL provide a reusable Codex skill that guides an agent to create or update code-first Warden hooks, including event selection, optional Python dependencies, optional agent-session use, and Warden-action selection when an agent is used.
+The system SHALL provide a reusable Codex skill that guides an agent to create or update code-first Warden hooks, including event selection, optional Python dependencies, optional agent-session use, and Warden-action selection when an agent is used. Onboarding SHALL install the skill under both `$CODEX_HOME/skills` and `$HOME/.agents/skills` without overwriting an unmanaged collision.
 
 #### Scenario: User asks Codex to create a hook
 - **WHEN** the user invokes the Warden hook-creation skill and describes the desired behavior

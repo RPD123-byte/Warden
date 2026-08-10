@@ -81,6 +81,7 @@ async fn hot_created_marker_routes_one_selected_turn_and_not_the_next() {
     let mut warden_config = Config {
         paths: DataPaths::under(temp.path().join("warden")),
         codex_home: temp.path().join("codex-home"),
+        agents_home: temp.path().join("agents-home"),
         hook_timeout: Duration::from_secs(3),
         max_hook_message_bytes: 256 * 1024,
         manage_gui: false,
@@ -303,7 +304,7 @@ async fn hot_created_marker_routes_one_selected_turn_and_not_the_next() {
                 "turn/started",
                 json!({"threadId":"thread","turn":{"id":"continuous-start","status":"inProgress","items":[
                     {"id":"user-continuous-start","type":"userMessage","content":[
-                        {"type":"text","text":format!("[$record-events-start]({}) start continuously", start_marker.display())}
+                        {"type":"text","text":"/record-events-start start continuously"}
                     ]}
                 ]}}),
             )
@@ -340,7 +341,7 @@ async fn hot_created_marker_routes_one_selected_turn_and_not_the_next() {
                 "turn/started",
                 json!({"threadId":"thread","turn":{"id":"continuous-stop","status":"inProgress","items":[
                     {"id":"user-continuous-stop","type":"userMessage","content":[
-                        {"type":"text","text":format!("[$record-events-stop]({}) stop continuously", stop_marker.display())}
+                        {"type":"text","text":"$record-events-stop stop continuously"}
                     ]}
                 ]}}),
             )

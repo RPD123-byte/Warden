@@ -93,8 +93,8 @@ impl ActivationRouter {
         })
     }
 
-    /// Resolves activation from Codex's selected-skill marker before events from the starting
-    /// source frame are routed. Literal slash-command text is intentionally ignored.
+    /// Resolves activation from Codex's selected-skill marker or a leading Warden command before
+    /// events from the starting source frame are routed.
     pub async fn begin_from_turn_start(&self, source: &SequencedEvent) -> Vec<HookId> {
         self.begin_from_source_with_input(source, None).await
     }
@@ -162,7 +162,13 @@ impl ActivationRouter {
             .retain(|key, _| key.thread_id != thread_id || key.turn_id == turn_id);
         let mut primary = Vec::new();
         let mut controls = HashMap::<HookId, HashSet<_>>::new();
-        for skill_path in structured_skill_paths(input) {
+        let mut selected_paths = structured_skill_paths(input);
+        selected_paths.extend(
+            leading_warden_commands(input)
+                .into_iter()
+                .map(|name| self.generated_skills_root.join(name).join("SKILL.md")),
+        );
+        for skill_path in selected_paths {
             let Ok(name) = resolve_marker_name(&self.generated_skills_root, &skill_path) else {
                 continue;
             };
@@ -401,6 +407,56 @@ fn structured_skill_paths(input: &Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     collect_skill_paths(input, &mut paths);
     paths
+}
+
+fn leading_warden_commands(input: &Value) -> Vec<String> {
+    let mut commands = Vec::new();
+    collect_leading_warden_commands(input, &mut commands);
+    commands
+}
+
+fn collect_leading_warden_commands(value: &Value, commands: &mut Vec<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_leading_warden_commands(value, commands);
+            }
+        }
+        Value::Object(object) => {
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("text" | "input_text")
+            ) && let Some(text) = object.get("text").and_then(Value::as_str)
+            {
+                commands.extend(parse_leading_warden_commands(text));
+            }
+            for value in object.values() {
+                collect_leading_warden_commands(value, commands);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_leading_warden_commands(text: &str) -> Vec<String> {
+    let mut rest = text.trim_start();
+    let mut commands = Vec::new();
+    loop {
+        let Some(command) = rest.strip_prefix('$').or_else(|| rest.strip_prefix('/')) else {
+            break;
+        };
+        let name_end = command
+            .find(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+            })
+            .unwrap_or(command.len());
+        if name_end == 0 {
+            break;
+        }
+        commands.push(command[..name_end].to_owned());
+        rest = command[name_end..].trim_start();
+    }
+    commands
 }
 
 fn collect_skill_paths(value: &Value, paths: &mut Vec<PathBuf>) {
@@ -811,7 +867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outside_skill_and_literal_slash_text_do_not_activate_and_gap_expires_state() {
+    async fn outside_skill_is_rejected_and_gap_expires_state() {
         let temp = TempDir::new().unwrap();
         let hooks = temp.path().join("hooks/demo");
         fs::create_dir_all(&hooks).unwrap();
@@ -832,7 +888,7 @@ mod tests {
             1,
             "turn/started",
             json!({"threadId":"t","turn":{"id":"bad","input":[
-                {"type":"text","text":"/demo"},
+                {"type":"text","text":"not a Warden command"},
                 {"type":"skill","name":"demo","path":outside}
             ]}}),
         );
@@ -848,6 +904,92 @@ mod tests {
         let gap = router.note_gap(2, Some(10), 20).await;
         assert_eq!(gap.expired_activations, 1);
         assert_eq!(router.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn leading_dollar_and_slash_commands_activate_generated_markers() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "def run(event): pass").unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry);
+
+        for (sequence, turn, command) in [
+            (1, "dollar", "$demo inspect this turn"),
+            (2, "slash", "/demo inspect this turn"),
+        ] {
+            let start = source(
+                sequence,
+                "turn/started",
+                json!({"threadId":"t","turn":{"id":turn,"input":[{
+                    "type":"text","text":command
+                }]}}),
+            );
+            assert_eq!(
+                router.begin_from_turn_start(&start).await,
+                [HookId::parse("demo").unwrap()]
+            );
+        }
+
+        let embedded = source(
+            3,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"embedded","input":[{
+                "type":"text","text":"please run /demo"
+            }]}}),
+        );
+        assert!(router.begin_from_turn_start(&embedded).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bare_continuous_controls_work_without_codex_skill_discovery() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join("hooks/demo");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("hook.py"), "def run(event): pass").unwrap();
+        let registry = HookRegistry::new(
+            temp.path().join("hooks"),
+            temp.path().join("modules"),
+            temp.path().join("skills"),
+            temp.path().join("runtimes"),
+            Arc::new(Preparer),
+        );
+        registry.refresh().await.unwrap();
+        let router = ActivationRouter::new(temp.path().join("skills"), registry);
+
+        let start = source(
+            1,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"start","input":[{
+                "type":"text","text":"/demo-start"
+            }]}}),
+        );
+        assert_eq!(
+            router.begin_from_turn_start(&start).await,
+            [HookId::parse("demo").unwrap()]
+        );
+        assert_eq!(router.continuous_sessions().await.len(), 1);
+
+        let stop = source(
+            2,
+            "turn/started",
+            json!({"threadId":"t","turn":{"id":"stop","input":[{
+                "type":"text","text":"$demo-stop"
+            }]}}),
+        );
+        assert_eq!(
+            router.begin_from_turn_start(&stop).await,
+            [HookId::parse("demo").unwrap()]
+        );
+        assert!(router.continuous_sessions().await.is_empty());
     }
 
     #[tokio::test]

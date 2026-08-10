@@ -16,7 +16,10 @@ warden start
 
 Leave `warden start` running in its own Terminal window. Startup safely onboards Codex, installs the
 hook-creation skill and bundled templates, configures Warden's native bridge, and watches for hook
-changes. It does not normally restart Codex.
+changes. The hook-creation skill and generated activation markers are exposed through both
+`~/.codex/skills` and `~/.agents/skills`, including to the local Codex process that runs Remote
+tasks. The Remote phone composer may not display local skills in its slash menu; a leading literal
+`$<marker>` or `/<marker>` still activates Warden. Startup does not normally restart Codex.
 
 Check the connection with:
 
@@ -37,12 +40,16 @@ The skill asks the necessary questions, writes the hook, checks it, and tells yo
 it. You can include your idea in the same message; answered questions will be skipped.
 
 Warden stores authored hooks at `~/.warden/warden-hooks/<name>/hook.py` and automatically creates
-selectable marker skills. Do not create marker skills or native Codex hooks yourself.
+selectable marker skills. Their canonical files remain under `~/.warden/generated-skills`; Warden
+owns symlink shims in both user skill roots and never overwrites a user-owned collision. Do not
+create marker skills or native Codex hooks yourself.
 
 ## Activate a hook
 
 Select the generated `<hook-name>` skill on a message. That activates the hook only for that message
-and its turn; select it again on another message to run it again.
+and its turn; select it again on another message to run it again. If Codex has not refreshed its
+skill picker, put `$<hook-name>` or `/<hook-name>` at the start of the message instead. Warden only
+recognizes names from its generated marker registry, so unrelated Codex slash commands pass through.
 
 Every hook also gets:
 
@@ -83,6 +90,7 @@ Run `warden health`, then confirm:
 - the daemon is connected and its bridge is configured, trusted, and loaded;
 - `~/.warden/warden-hooks/<name>/hook.py` exists;
 - `~/.warden/generated-skills/<name>/SKILL.md` appeared; and
+- `~/.agents/skills/<name>` and `~/.codex/skills/<name>` point to that marker; and
 - you selected that marker on the message being tested.
 
 Valid hook edits hot-publish without restarting Warden. An invalid edit leaves the last valid

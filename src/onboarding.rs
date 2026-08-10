@@ -42,6 +42,7 @@ pub struct HookTemplateInstall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexOnboarding {
     pub authoring_skill: PathBuf,
+    pub agents_authoring_skill: PathBuf,
     pub skill_changed: bool,
     pub hook_templates: Vec<HookTemplateInstall>,
     pub native_hooks: NativeHookInstall,
@@ -56,11 +57,26 @@ struct ManagedSkillManifest {
 pub fn reconcile_codex(config: &Config) -> io::Result<CodexOnboarding> {
     config.paths.create_all()?;
     let hook_templates = install_hook_templates(config)?;
-    let (authoring_skill, skill_changed) = install_authoring_skill(config)?;
+    let (authoring_skill, codex_skill_changed) = install_authoring_skill(
+        &config.codex_home.join("skills/create-warden-hook/SKILL.md"),
+        &config.paths.installations.join("create-warden-hook.json"),
+        "Codex",
+    )?;
+    let (agents_authoring_skill, agents_skill_changed) = install_authoring_skill(
+        &config
+            .agents_home
+            .join("skills/create-warden-hook/SKILL.md"),
+        &config
+            .paths
+            .installations
+            .join("create-warden-hook-agents.json"),
+        "Agents",
+    )?;
     let native_hooks = crate::native_hook::ensure_native_bridge_bundle(config)?;
     Ok(CodexOnboarding {
         authoring_skill,
-        skill_changed,
+        agents_authoring_skill,
+        skill_changed: codex_skill_changed || agents_skill_changed,
         hook_templates,
         native_hooks,
     })
@@ -153,17 +169,19 @@ fn sync_directory(_: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn install_authoring_skill(config: &Config) -> io::Result<(PathBuf, bool)> {
-    let target = config.codex_home.join("skills/create-warden-hook/SKILL.md");
-    let manifest_path = config.paths.installations.join("create-warden-hook.json");
+fn install_authoring_skill(
+    target: &Path,
+    manifest_path: &Path,
+    location_name: &str,
+) -> io::Result<(PathBuf, bool)> {
     let wanted_hash = hash(AUTHORING_SKILL.as_bytes());
-    let existing = fs::read(&target).ok();
+    let existing = fs::read(target).ok();
     if existing.as_deref() == Some(AUTHORING_SKILL.as_bytes()) {
-        ensure_manifest(&manifest_path, &target, &wanted_hash)?;
-        return Ok((target, false));
+        ensure_manifest(manifest_path, target, &wanted_hash)?;
+        return Ok((target.to_owned(), false));
     }
     if let Some(existing) = existing {
-        let owned = fs::read(&manifest_path)
+        let owned = fs::read(manifest_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ManagedSkillManifest>(&bytes).ok())
             .is_some_and(|manifest| {
@@ -173,15 +191,15 @@ fn install_authoring_skill(config: &Config) -> io::Result<(PathBuf, bool)> {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(
-                    "refusing to overwrite unmanaged Codex skill {}",
+                    "refusing to overwrite unmanaged {location_name} skill {}",
                     target.display()
                 ),
             ));
         }
     }
-    atomic_write(&target, AUTHORING_SKILL.as_bytes())?;
-    ensure_manifest(&manifest_path, &target, &wanted_hash)?;
-    Ok((target, true))
+    atomic_write(target, AUTHORING_SKILL.as_bytes())?;
+    ensure_manifest(manifest_path, target, &wanted_hash)?;
+    Ok((target.to_owned(), true))
 }
 
 fn ensure_manifest(path: &Path, target: &Path, installed_hash: &str) -> io::Result<()> {
@@ -221,6 +239,7 @@ mod tests {
         Config {
             paths: DataPaths::under(temp.path().join("warden")),
             codex_home: temp.path().join("codex"),
+            agents_home: temp.path().join("agents"),
             ..Config::default()
         }
     }
@@ -240,6 +259,10 @@ mod tests {
         .unwrap();
         let first = reconcile_codex(&config).unwrap();
         assert!(first.skill_changed);
+        assert_eq!(
+            fs::read_to_string(&first.agents_authoring_skill).unwrap(),
+            AUTHORING_SKILL
+        );
         assert!(first.native_hooks.changed);
         assert_eq!(first.hook_templates.len(), 1);
         assert!(first.hook_templates[0].installed);
@@ -250,6 +273,7 @@ mod tests {
         );
         let second = reconcile_codex(&config).unwrap();
         assert!(!second.skill_changed);
+        assert_eq!(second.agents_authoring_skill, first.agents_authoring_skill);
         assert!(!second.native_hooks.changed);
         assert!(!second.hook_templates[0].installed);
         assert_eq!(
@@ -273,6 +297,22 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, "user owned").unwrap();
         let error = reconcile_codex(&config).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(target).unwrap(), "user owned");
+    }
+
+    #[test]
+    fn unmanaged_agents_skill_collision_is_preserved() {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp);
+        let target = config
+            .agents_home
+            .join("skills/create-warden-hook/SKILL.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "user owned").unwrap();
+
+        let error = reconcile_codex(&config).unwrap_err();
+
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(target).unwrap(), "user owned");
     }

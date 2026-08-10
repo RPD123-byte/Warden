@@ -10,6 +10,7 @@ fn config(temp: &TempDir) -> Config {
     Config {
         paths: DataPaths::under(temp.path().join("custom-warden-home")),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         python_sdk: Path::new(env!("CARGO_MANIFEST_DIR")).join("python"),
         ..Config::default()
     }

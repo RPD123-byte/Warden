@@ -40,6 +40,7 @@ mod macos {
         let warden_config = WardenConfig {
             paths: paths.clone(),
             codex_home: temp.path().join("codex-home"),
+            agents_home: temp.path().join("agents-home"),
             python_sdk: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
             ..WardenConfig::default()
         };

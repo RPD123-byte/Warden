@@ -93,10 +93,16 @@ Put shared Python modules under `WARDEN_HOME/modules/`. Keep hook-specific execu
 1. Check Python syntax and require JSON-serializable return values.
 2. Let Warden's watcher validate and publish the change; there is no reload command.
 3. Run `warden health` and inspect daemon output if publication fails.
-4. Confirm `WARDEN_HOME/generated-skills/<hook-name>/SKILL.md` appears. Never repair it manually.
+4. Confirm `WARDEN_HOME/generated-skills/<hook-name>/SKILL.md` appears and Warden has exposed its
+   symlink shims under both `~/.agents/skills/<hook-name>` and `~/.codex/skills/<hook-name>`. Never
+   repair these generated entries manually.
 5. Explain how to activate the generated marker:
-   - selecting `<hook-name>` activates it for one message and that turn;
+   - selecting `<hook-name>`, or beginning the message with `$<hook-name>` or `/<hook-name>`, activates it for one message and that turn;
    - every hook also gets `<hook-name>-start` and `<hook-name>-stop`;
    - hooks with a module-scope persistent agent session also get `<hook-name>-pause` and `<hook-name>-resume`.
+
+Leading `$` and `/` activation is resolved only through Warden's generated marker registry. It works
+even when an already-open Codex task has not refreshed its selectable-skill catalog; an unregistered
+name or a marker mentioned later in prose does not activate anything.
 
 When updating a hook, preserve unrelated user logic. An invalid candidate leaves the last valid revision active. For recoverable removal, move the authored hook directory outside `warden-hooks/`; Warden removes its generated markers and stops new activations.

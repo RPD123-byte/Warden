@@ -89,6 +89,7 @@ async fn native_barrier_waits_for_blocking_and_releases_non_blocking() {
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(3),
         max_concurrent_hooks: 2,
         ..Config::default()
@@ -177,6 +178,7 @@ async fn native_bundle_maps_all_events_authenticates_and_scopes_activation_to_on
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(3),
         max_concurrent_hooks: 4,
         ..Config::default()
@@ -323,6 +325,7 @@ async fn mixed_modes_run_blocking_hooks_concurrently_without_waiting_for_non_blo
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(3),
         max_concurrent_hooks: 4,
         ..Config::default()
@@ -422,6 +425,7 @@ async fn non_blocking_queue_rejects_saturation_and_drains_with_bounded_capacity(
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(3),
         max_concurrent_hooks: 1,
         ..Config::default()
@@ -514,6 +518,7 @@ async fn pre_and_post_tool_boundaries_wait_only_for_blocking_revisions() {
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(3),
         max_concurrent_hooks: 2,
         ..Config::default()
@@ -621,6 +626,7 @@ async fn disconnect_does_not_cancel_native_blocking_hook_and_replacement_stays_h
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(3),
         max_concurrent_hooks: 1,
         ..Config::default()

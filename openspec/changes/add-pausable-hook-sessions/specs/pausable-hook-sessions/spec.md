@@ -24,6 +24,8 @@ The system SHALL support at most one continuous activation session for each `(ho
 ### Requirement: Generated markers match hook statefulness
 For each published hook, the system SHALL generate selectable marker skills named `<hook>-start` and `<hook>-stop` in addition to the existing primary marker. The system SHALL additionally generate `<hook>-pause` and `<hook>-resume` only when the prepared hook is classified as stateful because it declares a named persistent Claude or Codex session that retains conversation history between activations. Hooks using only fresh Claude or Codex inference, and hooks using no agent, SHALL be classified as stateless. This classification SHALL be derived from the existing agent-session declaration rather than a new hook lifecycle configuration field. Every generated control skill SHALL contain exactly `This skill is an activation marker for the local Warden service. Ignore`, and its path and generated metadata SHALL identify the target hook and control operation without placing executable hook logic in the skill.
 
+Warden SHALL accept a generated marker supplied by Codex as a structured skill selection or selected-skill link. Warden SHALL also accept an exact `$<marker>` or `/<marker>` token at the start of the user message by resolving it through the same generated-marker registry. An unregistered command or a marker-like token later in prose SHALL NOT activate a hook.
+
 #### Scenario: Stateful agent hook publishes all controls
 - **WHEN** Warden publishes a valid hook that declares a named persistent Claude or Codex session
 - **THEN** the primary, start, stop, pause, and resume markers are discoverable through Codex skill selection
@@ -48,6 +50,15 @@ For each published hook, the system SHALL generate selectable marker skills name
 - **WHEN** an authored hook directory is removed from discovery
 - **THEN** Warden removes that hook's primary and control markers
 - **AND** Warden stops and removes its continuous activation sessions so re-adding the hook requires an explicit new start
+
+#### Scenario: Existing task has a stale Codex skill catalog
+- **WHEN** a generated marker is absent from an already-open Codex task's picker and the user begins a message with its exact `$<marker>` or `/<marker>` name
+- **THEN** Warden resolves the name through its current generated-marker registry and applies the same activation intent
+- **AND** no Codex or Warden daemon restart is required merely to publish or use the newly generated marker
+
+#### Scenario: Bare command is not a Warden marker
+- **WHEN** a message begins with an unregistered slash or dollar command, or mentions a registered marker only later in prose
+- **THEN** Warden does not activate a hook from that text
 
 ### Requirement: Available lifecycle transitions are deterministic
 The system SHALL process continuous control markers before routing ordinary hook deliveries for the same user turn. Start and stop SHALL apply to both stateful and stateless hooks. For stateful hooks only, pause SHALL retain the session in a dormant state and resume SHALL reactivate an existing paused session. Repeating an already-satisfied available control outcome SHALL be idempotent. Resume SHALL NOT implicitly create a session that was never started or was stopped.

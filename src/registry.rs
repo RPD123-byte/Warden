@@ -133,6 +133,7 @@ pub struct HookRegistry {
     hooks_root: PathBuf,
     modules_root: PathBuf,
     generated_skills_root: PathBuf,
+    marker_mirror_roots: Vec<PathBuf>,
     revisions_root: PathBuf,
     preparer: Arc<dyn HookPreparer>,
     refresh_lock: Arc<Mutex<()>>,
@@ -153,6 +154,7 @@ impl HookRegistry {
             hooks_root,
             modules_root,
             generated_skills_root,
+            marker_mirror_roots: Vec::new(),
             revisions_root: runtimes_root.join("revisions"),
             preparer,
             refresh_lock: Arc::new(Mutex::new(())),
@@ -160,6 +162,12 @@ impl HookRegistry {
             failures: Arc::new(RwLock::new(HashMap::new())),
             marker_catalog: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Adds user skill roots that expose canonical Warden markers through owned symlinks.
+    pub fn with_marker_mirrors(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.marker_mirror_roots = roots.into_iter().collect();
+        self
     }
 
     pub async fn current(&self, id: &HookId) -> Option<Arc<HookRevision>> {
@@ -417,6 +425,9 @@ impl HookRegistry {
             .collect::<HashSet<_>>();
         for stale in existing.difference(&desired_ids) {
             remove_marker(&self.generated_skills_root, stale.as_str())?;
+        }
+        for root in &self.marker_mirror_roots {
+            reconcile_marker_mirror(root, &self.generated_skills_root, &desired)?;
         }
         *self.marker_catalog.write().await = desired;
         Ok(())
@@ -828,6 +839,73 @@ fn remove_marker(root: &Path, name: &str) -> Result<(), RegistryError> {
     fs::remove_dir_all(&tombstone).map_err(|source| io_error(tombstone, source))
 }
 
+fn reconcile_marker_mirror(
+    mirror_root: &Path,
+    canonical_root: &Path,
+    desired: &HashMap<String, MarkerIntent>,
+) -> Result<(), RegistryError> {
+    create_dir(mirror_root)?;
+    let canonical_root = fs::canonicalize(canonical_root)
+        .map_err(|source| io_error(canonical_root.to_owned(), source))?;
+
+    for name in desired.keys() {
+        let target = canonical_root.join(name);
+        let link = mirror_root.join(name);
+        match fs::symlink_metadata(&link) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let existing =
+                    fs::read_link(&link).map_err(|source| io_error(link.clone(), source))?;
+                if existing != target {
+                    tracing::warn!(
+                        path = %link.display(),
+                        target = %existing.display(),
+                        "preserving non-Warden skill symlink that collides with a marker"
+                    );
+                }
+            }
+            Ok(_) => tracing::warn!(
+                path = %link.display(),
+                "preserving non-Warden skill that collides with a marker"
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_skill_symlink(&target, &link)?;
+            }
+            Err(source) => return Err(io_error(link, source)),
+        }
+    }
+
+    for entry in
+        fs::read_dir(mirror_root).map_err(|source| io_error(mirror_root.to_owned(), source))?
+    {
+        let entry = entry.map_err(|source| io_error(mirror_root.to_owned(), source))?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| io_error(path.clone(), source))?;
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let target = fs::read_link(&path).map_err(|source| io_error(path.clone(), source))?;
+        if target == canonical_root.join(&name) && !desired.contains_key(&name) {
+            fs::remove_file(&path).map_err(|source| io_error(path, source))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_skill_symlink(target: &Path, link: &Path) -> Result<(), RegistryError> {
+    std::os::unix::fs::symlink(target, link).map_err(|source| io_error(link.to_owned(), source))
+}
+
+#[cfg(windows)]
+fn create_skill_symlink(target: &Path, link: &Path) -> Result<(), RegistryError> {
+    std::os::windows::fs::symlink_dir(target, link)
+        .map_err(|source| io_error(link.to_owned(), source))
+}
+
 fn persist_current_manifest(
     revisions_root: &Path,
     revision: &HookRevision,
@@ -1049,6 +1127,66 @@ mod tests {
             fs::read_to_string(&original.hook_file)
                 .unwrap()
                 .contains("pass")
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_shims_are_mirrored_cleaned_up_and_never_overwrite_user_skills() {
+        let temp = TempDir::new().unwrap();
+        let codex_skills = temp.path().join("codex/skills");
+        let agents_skills = temp.path().join("agents/skills");
+        fs::create_dir_all(agents_skills.join("demo-stop")).unwrap();
+        fs::write(
+            agents_skills.join("demo-stop/SKILL.md"),
+            "user-owned collision",
+        )
+        .unwrap();
+        let registry =
+            registry(&temp).with_marker_mirrors([codex_skills.clone(), agents_skills.clone()]);
+        let authored = temp.path().join("hooks/demo");
+        fs::create_dir_all(&authored).unwrap();
+        fs::write(authored.join("hook.py"), "def run(event): pass").unwrap();
+
+        registry.refresh().await.unwrap();
+
+        for root in [&codex_skills, &agents_skills] {
+            for name in ["demo", "demo-start"] {
+                let shim = root.join(name);
+                assert!(
+                    fs::symlink_metadata(&shim)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink(),
+                    "{} is not a symlink",
+                    shim.display()
+                );
+                assert_eq!(
+                    fs::canonicalize(shim.join("SKILL.md")).unwrap(),
+                    fs::canonicalize(temp.path().join("skills").join(name).join("SKILL.md"))
+                        .unwrap()
+                );
+            }
+        }
+        assert_eq!(
+            fs::read_to_string(agents_skills.join("demo-stop/SKILL.md")).unwrap(),
+            "user-owned collision"
+        );
+        assert!(codex_skills.join("demo-stop").is_symlink());
+
+        fs::remove_dir_all(&authored).unwrap();
+        registry.refresh().await.unwrap();
+
+        for root in [&codex_skills, &agents_skills] {
+            for name in ["demo", "demo-start"] {
+                assert_eq!(
+                    fs::symlink_metadata(root.join(name)).unwrap_err().kind(),
+                    io::ErrorKind::NotFound
+                );
+            }
+        }
+        assert_eq!(
+            fs::read_to_string(agents_skills.join("demo-stop/SKILL.md")).unwrap(),
+            "user-owned collision"
         );
     }
 

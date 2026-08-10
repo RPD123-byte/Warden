@@ -66,6 +66,7 @@ pub struct Config {
     pub python: PathBuf,
     pub python_sdk: PathBuf,
     pub codex_home: PathBuf,
+    pub agents_home: PathBuf,
     pub hook_timeout: Duration,
     pub candidate_timeout: Duration,
     pub agent_timeout: Duration,
@@ -90,6 +91,10 @@ impl Default for Config {
                 .map(PathBuf::from)
                 .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
                 .unwrap_or_else(|| PathBuf::from(".codex")),
+            agents_home: std::env::var_os("WARDEN_AGENTS_HOME")
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|home| home.join(".agents")))
+                .unwrap_or_else(|| PathBuf::from(".agents")),
             // Agent-backed hooks must outlive the provider's own bounded deadline so the
             // gateway can return (or cancel) the provider result before the worker is reaped.
             hook_timeout: Duration::from_secs(10 * 60 + 30),

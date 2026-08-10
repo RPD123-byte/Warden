@@ -276,6 +276,7 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         hook_timeout: Duration::from_secs(8),
         agent_timeout: Duration::from_secs(5),
         ..Config::default()

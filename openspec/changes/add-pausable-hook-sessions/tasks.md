@@ -48,3 +48,4 @@
 - [x] 7.1 Run Rust formatting, linting, unit tests, integration tests, and the existing Python hook-runtime test suite.
 - [x] 7.2 Run a live Codex/Claude smoke test that starts `unspecified-decisions`, observes a markerless later turn, pauses it, confirms no inference occurs, resumes the same Claude conversation, and stops it.
 - [x] 7.3 Restart Warden during both running and paused states and verify restored behavior, bounded health output, no cross-task activation, and no idle provider subprocess.
+- [x] 7.4 Accept registry-validated leading `$` and `/` marker commands when Codex omits a structured skill attachment, with router and end-to-end coverage.

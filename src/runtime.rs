@@ -68,6 +68,7 @@ impl Warden {
         })?;
         tracing::info!(
             authoring_skill = %onboarding.authoring_skill.display(),
+            agents_authoring_skill = %onboarding.agents_authoring_skill.display(),
             skill_changed = onboarding.skill_changed,
             hook_templates = ?onboarding.hook_templates,
             native_hooks = %onboarding.native_hooks.hooks_file.display(),
@@ -128,7 +129,11 @@ impl Warden {
             config.paths.generated_skills.clone(),
             config.paths.runtimes.clone(),
             python.clone(),
-        );
+        )
+        .with_marker_mirrors([
+            config.codex_home.join("skills"),
+            config.agents_home.join("skills"),
+        ]);
         let initial_delta = registry.refresh().await?;
         log_registry_delta(&initial_delta);
 

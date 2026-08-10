@@ -20,6 +20,7 @@
 - [x] 3.3 Attach the generated-skill root to the managed app-server and refresh skill discovery when hooks are added, changed, removed, or the app-server reconnects.
 - [x] 3.4 Implement file watching and atomic revision publication so invalid candidates preserve the last valid hook and in-flight invocations retain their starting revision.
 - [x] 3.5 Add tests proving a new hook becomes selectable without native `hooks.json` mutation and is inactive on the next turn unless its marker skill is selected again.
+- [x] 3.6 Mirror canonical activation markers into both user skill roots with owned symlinks, preserve collisions, and test publication and cleanup.
 
 ## 4. Managed Python Hook Runtime
 

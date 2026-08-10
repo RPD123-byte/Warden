@@ -39,6 +39,7 @@ mod macos {
         let config = Config {
             paths: paths.clone(),
             codex_home: temp.path().join("codex-home"),
+            agents_home: temp.path().join("agents-home"),
             python_sdk: Path::new(env!("CARGO_MANIFEST_DIR")).join("python"),
             ..Config::default()
         };

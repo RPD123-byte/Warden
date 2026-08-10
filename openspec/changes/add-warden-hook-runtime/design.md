@@ -61,7 +61,7 @@ Every valid hook directory produces one `generated-skills/<hook-name>/SKILL.md`.
 This skill is an activation marker for the local Warden service. Ignore
 ```
 
-Warden calls the typed dependency API to attach `generated-skills/` on initial connection and reconnection. File changes produce a new skill revision and trigger skill discovery refresh. No authored hook logic is copied into the skill.
+Warden calls the typed dependency API to attach `generated-skills/` on initial connection and reconnection. It also publishes Warden-owned symlink shims for every marker under both `$CODEX_HOME/skills` and `$HOME/.agents/skills`, allowing backward compatibility and user-wide discovery by the local Codex process that runs Desktop, CLI, and Remote tasks while retaining one canonical marker file. This does not imply that every client UI, including the Remote phone composer, renders local skills in its slash menu. Codex canonicalizes the symlink target, so all discovery paths retain the canonical Warden identity. File changes produce a new skill revision and trigger skill discovery refresh. No authored hook logic is copied into the skill, and a non-Warden file or symlink collision is preserved rather than overwritten.
 
 Keeping generated skills outside authored hook directories prevents Codex from becoming the execution runtime and makes it safe to regenerate the UI projection.
 
@@ -71,7 +71,7 @@ The activation resolver first accepts a structured `type: "skill"` item when the
 
 An activation record is keyed by hook revision, thread ID, and turn ID. It begins when the starting turn input contains the marker and is removed on `TurnCompleted`, `TurnFailed`, or `TurnInterrupted`. A persistent Claude or Codex conversation may outlive the activation, but it receives nothing while no activation exists.
 
-Arbitrary slash-command text remains inert. The marker-link parser exists because the installed Codex Desktop app-server does not retain a structured skill item in `turn/started`; canonical path containment and hook-directory identity remain authoritative.
+A leading `$<marker>` or `/<marker>` token is also resolved through the current Warden marker registry so an already-open task can activate a hot-published marker even if its picker is stale. Other slash-command text and marker-like text later in prose remain inert. The marker-link parser exists because the installed Codex Desktop app-server does not retain a structured skill item in `turn/started`; canonical path containment and hook-directory identity remain authoritative.
 
 ### 4. Wrap, do not replace, `SequencedEvent`
 

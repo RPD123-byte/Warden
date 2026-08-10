@@ -36,6 +36,7 @@ async fn first_startup_attaches_markers_trusts_exact_bridge_hashes_and_reports_r
     let mut config = Config {
         paths: paths.clone(),
         codex_home: temp.path().join("codex"),
+        agents_home: temp.path().join("agents"),
         manage_gui: false,
         ..Config::default()
     };
@@ -90,6 +91,15 @@ async fn first_startup_attaches_markers_trusts_exact_bridge_hashes_and_reports_r
             std::fs::read_to_string(installed_authoring_skill).unwrap(),
             include_str!("../.agents/skills/create-warden-hook/SKILL.md")
         );
+        let installed_agents_authoring_skill = paths
+            .root
+            .parent()
+            .unwrap()
+            .join("agents/skills/create-warden-hook/SKILL.md");
+        assert_eq!(
+            std::fs::read_to_string(installed_agents_authoring_skill).unwrap(),
+            include_str!("../.agents/skills/create-warden-hook/SKILL.md")
+        );
         assert!(paths.native_hooks.join("bridge.py").is_file());
         assert!(paths.hooks.join("unspecified-decisions/hook.py").is_file());
         let marker = std::fs::read_to_string(
@@ -99,6 +109,21 @@ async fn first_startup_attaches_markers_trusts_exact_bridge_hashes_and_reports_r
         )
         .unwrap();
         assert!(marker.trim().ends_with(warden_daemon::MARKER_BODY));
+        for root in [
+            paths.root.parent().unwrap().join("codex/skills"),
+            paths.root.parent().unwrap().join("agents/skills"),
+        ] {
+            let shim = root.join("unspecified-decisions/SKILL.md");
+            assert_eq!(
+                std::fs::canonicalize(shim).unwrap(),
+                std::fs::canonicalize(
+                    paths
+                        .generated_skills
+                        .join("unspecified-decisions/SKILL.md")
+                )
+                .unwrap()
+            );
+        }
 
         let health = tokio::process::Command::new(env!("CARGO_BIN_EXE_warden"))
             .args(["--socket", socket_for_health.to_str().unwrap(), "health"])
