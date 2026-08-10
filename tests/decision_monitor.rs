@@ -374,7 +374,9 @@ async fn template_blocks_reuses_context_and_delivers_question_after_interrupt() 
                 json!({
                     "hook_event_name":"UserPromptSubmit", "session_id":"thread-a",
                     "turn_id":"turn-thread-a", "cwd":temp.path(),
-                    "prompt":format!("[$unspecified-decisions-start]({}) review continuously", start_marker.display())
+                    // Codex inserts a selected skill at the current cursor position, so a Warden
+                    // marker must activate even when ordinary prompt text comes before it.
+                    "prompt":format!("Review continuously, including this activation marker at the cursor position: [$unspecified-decisions-start]({})", start_marker.display())
                 }),
             ))
             .await;

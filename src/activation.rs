@@ -93,8 +93,8 @@ impl ActivationRouter {
         })
     }
 
-    /// Resolves activation from Codex's selected-skill marker or a leading Warden command before
-    /// events from the starting source frame are routed.
+    /// Resolves activation from Codex's selected-skill marker anywhere in the prompt or from a
+    /// leading Warden command before events from the starting source frame are routed.
     pub async fn begin_from_turn_start(&self, source: &SequencedEvent) -> Vec<HookId> {
         self.begin_from_source_with_input(source, None).await
     }
@@ -497,15 +497,21 @@ fn collect_skill_paths(value: &Value, paths: &mut Vec<PathBuf>) {
 }
 
 fn selected_skill_link_paths(text: &str) -> Vec<PathBuf> {
-    let mut rest = text.trim_start();
+    let mut rest = text;
     let mut paths = Vec::new();
-    while let Some(marker) = rest.strip_prefix("[$") {
+    while let Some(marker_start) = rest.find("[$") {
+        let marker = &rest[marker_start + "[$".len()..];
         let Some(name_end) = marker.find("](") else {
             break;
         };
         let name = &marker[..name_end];
-        if name.is_empty() {
-            break;
+        if name.is_empty()
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            })
+        {
+            rest = marker;
+            continue;
         }
         let path_start = name_end + "](".len();
         let Some(relative_end) = marker[path_start..].find(')') else {
@@ -519,10 +525,11 @@ fn selected_skill_link_paths(text: &str) -> Vec<PathBuf> {
             .and_then(|value| value.to_str())
             != Some(name)
         {
-            break;
+            rest = marker;
+            continue;
         }
         paths.push(path);
-        rest = marker[path_end + 1..].trim_start();
+        rest = &marker[path_end + 1..];
     }
     paths
 }
@@ -706,6 +713,19 @@ mod tests {
         );
 
         assert_eq!(router.begin_from_turn_start(&start).await.len(), 2);
+    }
+
+    #[test]
+    fn selected_skill_links_are_found_at_any_cursor_position() {
+        let first = PathBuf::from("/tmp/generated-skills/first/SKILL.md");
+        let second = PathBuf::from("/tmp/generated-skills/second/SKILL.md");
+        let text = format!(
+            "ordinary text before [$first]({}) and between [$second]({}) ordinary text after",
+            first.display(),
+            second.display()
+        );
+
+        assert_eq!(selected_skill_link_paths(&text), vec![first, second]);
     }
 
     #[tokio::test]
